@@ -533,6 +533,52 @@ const shapes = ["circle","square","triangle","diamond"];
 
 const symbolMap = {};        // stores symbol for each route/day combo
 const routeDayGroups = {};   // stores map markers grouped by route/day
+
+function createRouteDayGroup() {
+  return {
+    layers: [],
+    layerGroup: L.layerGroup()
+  };
+}
+
+function ensureRouteDayGroup(key) {
+  if (!routeDayGroups[key]) {
+    routeDayGroups[key] = createRouteDayGroup();
+  } else if (!routeDayGroups[key].layerGroup) {
+    routeDayGroups[key].layerGroup = L.layerGroup();
+    (routeDayGroups[key].layers || []).forEach(layer => {
+      routeDayGroups[key].layerGroup.addLayer(layer);
+    });
+  }
+  return routeDayGroups[key];
+}
+
+function addMarkerToRouteDayGroup(key, marker) {
+  const group = ensureRouteDayGroup(key);
+  group.layers.push(marker);
+  group.layerGroup.addLayer(marker);
+}
+
+function removeMarkerFromRouteDayGroup(key, marker) {
+  const group = routeDayGroups[key];
+  if (!group) return;
+
+  group.layers = (group.layers || []).filter(layer => layer !== marker);
+  if (group.layerGroup) group.layerGroup.removeLayer(marker);
+}
+
+function removeRouteDayGroupFromMap(group) {
+  if (!group) return;
+
+  if (group.layerGroup) {
+    if (map.hasLayer(group.layerGroup)) map.removeLayer(group.layerGroup);
+    return;
+  }
+
+  (group.layers || []).forEach(layer => {
+    if (layer && layer._map === map) map.removeLayer(layer);
+  });
+}
 // ===== DELIVERED STOPS LAYER =====
 
 function normalizeDayToken(value) {
@@ -589,13 +635,12 @@ window.highlightRouteDayOnMap = function(routeValue, dayValue) {
     return { ok: false, message: `No map points found for ${routeToken} | ${dayValue}.` };
   }
 
-  layerVisibilityState[matchingKey] = true;
-  const layerCheckbox = document.querySelector(`input[data-key="${matchingKey}"]`);
+  const layerCheckbox = getLayerCheckboxByKey(matchingKey);
   if (layerCheckbox) layerCheckbox.checked = true;
+  setRouteDayLayerState(matchingKey, true);
 
   const bounds = L.latLngBounds();
   markers.forEach(marker => {
-    map.addLayer(marker);
     const ll = getLayerLatLng(marker);
     if (ll) bounds.extend(ll);
 
@@ -798,22 +843,193 @@ document.getElementById("daysAll").onclick    = () => setCheckboxGroup("dayCheck
 document.getElementById("daysNone").onclick   = () => setCheckboxGroup("dayCheckboxes", false);
 
 
+function getLayerCheckboxByKey(key) {
+  if (!key) return null;
+  if (window.CSS && typeof window.CSS.escape === "function") {
+    return document.querySelector(`input[data-key="${CSS.escape(key)}"]`);
+  }
+  return [...document.querySelectorAll("input[data-key]")]
+    .find(cb => cb.dataset.key === key) || null;
+}
+
+function applyLayerGroupVisibility(key, show) {
+  const group = routeDayGroups[key];
+  if (!group) return;
+
+  if (group.layerGroup) {
+    const isOnMap = map.hasLayer(group.layerGroup);
+    if (show) {
+      if (!isOnMap) group.layerGroup.addTo(map);
+    } else if (isOnMap) {
+      map.removeLayer(group.layerGroup);
+    }
+    return;
+  }
+
+  if (!Array.isArray(group.layers)) return;
+
+  group.layers.forEach(marker => {
+    const isOnMap = marker && marker._map === map;
+    if (show) {
+      if (!isOnMap) marker.addTo(map);
+    } else if (isOnMap) {
+      map.removeLayer(marker);
+    }
+  });
+}
+
+let layerVisibilityChunkRunId = 0;
+
+function applyAllLayerVisibilityInChunks() {
+  const runId = ++layerVisibilityChunkRunId;
+  const entries = Object.entries(routeDayGroups);
+
+  const allGroupsBackedByLeafletGroup = entries.every(([, group]) => !!group?.layerGroup);
+  if (allGroupsBackedByLeafletGroup) {
+    let groupIndexFastPath = 0;
+    const frameBudgetMsFastPath = 8;
+
+    const runFastPath = () => {
+      if (runId !== layerVisibilityChunkRunId) return;
+
+      const frameStart = performance.now();
+      while (groupIndexFastPath < entries.length && (performance.now() - frameStart) < frameBudgetMsFastPath) {
+        const [key, group] = entries[groupIndexFastPath++];
+        const show = !!layerVisibilityState[key];
+        const isOnMap = map.hasLayer(group.layerGroup);
+        if (show) {
+          if (!isOnMap) group.layerGroup.addTo(map);
+        } else if (isOnMap) {
+          map.removeLayer(group.layerGroup);
+        }
+      }
+
+      if (groupIndexFastPath < entries.length) {
+        requestAnimationFrame(runFastPath);
+        return;
+      }
+
+      updateStats();
+    };
+
+    runFastPath();
+    return;
+  }
+
+  let groupIndex = 0;
+  let layerIndex = 0;
+  const frameBudgetMs = 8;
+
+  const run = () => {
+    if (runId !== layerVisibilityChunkRunId) return;
+
+    const frameStart = performance.now();
+
+    while (groupIndex < entries.length && (performance.now() - frameStart) < frameBudgetMs) {
+      const [key, group] = entries[groupIndex];
+      const layers = group?.layers || [];
+      const show = !!layerVisibilityState[key];
+
+      while (layerIndex < layers.length && (performance.now() - frameStart) < frameBudgetMs) {
+        const marker = layers[layerIndex++];
+        const isOnMap = marker && marker._map === map;
+        if (show) {
+          if (!isOnMap) marker.addTo(map);
+        } else if (isOnMap) {
+          map.removeLayer(marker);
+        }
+      }
+
+      if (layerIndex >= layers.length) {
+        groupIndex++;
+        layerIndex = 0;
+      }
+    }
+
+    if (groupIndex < entries.length) {
+      requestAnimationFrame(run);
+      return;
+    }
+
+    updateStats();
+  };
+
+  run();
+}
+
+function setRouteDayLayerBulkState(checked) {
+  const routeDayCheckboxes = [...document.querySelectorAll("#routeDayLayers input[type='checkbox']")];
+  const activeRoutes = new Set();
+
+  routeDayCheckboxes.forEach(cb => {
+    cb.checked = checked;
+    const key = cb.dataset.key;
+    if (!key) return;
+    layerVisibilityState[key] = checked;
+
+    if (checked) {
+      const [route, type] = key.split("|");
+      if (route && type !== "Delivered") activeRoutes.add(route);
+    }
+  });
+
+  if (checked && activeRoutes.size) {
+    document.querySelectorAll("#deliveredControls input[type='checkbox']").forEach(cb => {
+      const key = cb.dataset.key;
+      if (!key) return;
+      const [route, type] = key.split("|");
+      if (type === "Delivered" && activeRoutes.has(route)) {
+        cb.checked = false;
+        layerVisibilityState[key] = false;
+      }
+    });
+  }
+
+  applyAllLayerVisibilityInChunks();
+}
+
+function setRouteDayLayerState(key, checked) {
+  if (!key || !routeDayGroups[key]) return;
+
+  layerVisibilityChunkRunId++;
+  layerVisibilityState[key] = checked;
+
+  const [route, type] = key.split("|");
+  const keysToHide = [];
+
+  if (checked) {
+    if (type === "Delivered") {
+      Object.keys(routeDayGroups).forEach(otherKey => {
+        const [otherRoute, otherType] = otherKey.split("|");
+        if (otherRoute === route && otherType !== "Delivered") {
+          keysToHide.push(otherKey);
+        }
+      });
+    } else {
+      const deliveredKey = `${route}|Delivered`;
+      if (routeDayGroups[deliveredKey]) keysToHide.push(deliveredKey);
+    }
+  }
+
+  keysToHide.forEach(otherKey => {
+    layerVisibilityState[otherKey] = false;
+    const otherCheckbox = getLayerCheckboxByKey(otherKey);
+    if (otherCheckbox) otherCheckbox.checked = false;
+    applyLayerGroupVisibility(otherKey, false);
+  });
+
+  applyLayerGroupVisibility(key, checked);
+  updateStats();
+}
+
 
 // ===== Route + Day ALL / NONE =====
 document.getElementById("routeDayAll").onclick  = () => {
-  document.querySelectorAll("#routeDayLayers input[type='checkbox']")
-    .forEach(cb => {
-      cb.checked = true;
-      cb.dispatchEvent(new Event("change"));
-    });
+  setRouteDayLayerBulkState(true);
 };
 
 document.getElementById("routeDayNone").onclick = () => {
-  document.querySelectorAll("#routeDayLayers input[type='checkbox']")
-    .forEach(cb => {
-      cb.checked = false;
-      cb.dispatchEvent(new Event("change"));
-    });
+  setRouteDayLayerBulkState(false);
 };
 
 
@@ -863,7 +1079,7 @@ function applyFilters() {
 
     const show = routes.includes(r) && days.includes(d);
 
-    group.layers.forEach(l => show ? l.addTo(map) : map.removeLayer(l));
+    applyLayerGroupVisibility(key, show);
   });
 
   updateStats();
@@ -877,7 +1093,9 @@ function updateStats() {
   list.innerHTML = "";
 
   Object.entries(routeDayGroups).forEach(([key, group]) => {
-    const visible = group.layers.filter(l => map.hasLayer(l)).length;
+    const visible = group.layerGroup
+      ? (map.hasLayer(group.layerGroup) ? (group.layers || []).length : 0)
+      : (group.layers || []).filter(l => map.hasLayer(l)).length;
     if (!visible) return;
 
     const [r,d] = key.split("|");
@@ -963,58 +1181,12 @@ if (layerVisibilityState.hasOwnProperty(key)) {
 }
 
     // Apply visibility immediately
-    routeDayGroups[key].layers.forEach(marker => {
-      if (checkbox.checked) {
-        map.addLayer(marker);
-      } else {
-        map.removeLayer(marker);
-      }
-    });
+    applyLayerGroupVisibility(key, checkbox.checked);
 
     // Toggle behavior
     checkbox.addEventListener("change", () => {
-
-  layerVisibilityState[key] = checkbox.checked;
-
-  const [route, type] = key.split("|");
-
-  // 🚫 Prevent Route + Delivered both visible
-  Object.keys(routeDayGroups).forEach(otherKey => {
-
-    const [otherRoute, otherType] = otherKey.split("|");
-
-    if (
-      otherRoute === route &&
-      otherKey !== key &&
-      (
-        (type === "Delivered" && otherType !== "Delivered") ||
-        (type !== "Delivered" && otherType === "Delivered")
-      )
-    ) {
-      // uncheck the conflicting layer
-      layerVisibilityState[otherKey] = false;
-
-      const otherCheckbox =
-        document.querySelector(`input[data-key="${otherKey}"]`);
-
-      if (otherCheckbox) otherCheckbox.checked = false;
-
-      routeDayGroups[otherKey].layers.forEach(m =>
-        map.removeLayer(m)
-      );
-    }
-  });
-
-  // Apply this checkbox visibility
-  routeDayGroups[key].layers.forEach(marker => {
-    if (checkbox.checked) {
-      map.addLayer(marker);
-    } else {
-      map.removeLayer(marker);
-    }
-  });
-
-});
+      setRouteDayLayerState(key, checkbox.checked);
+    });
 
 
     // === SYMBOL PREVIEW ===
@@ -1448,7 +1620,7 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
   window._currentWorkbook = wb;
 
   // Clear previous map data
-  Object.values(routeDayGroups).forEach(g => g.layers.forEach(l => map.removeLayer(l)));
+  Object.values(routeDayGroups).forEach(removeRouteDayGroupFromMap);
   Object.keys(routeDayGroups).forEach(k => delete routeDayGroups[k]);
   Object.keys(symbolMap).forEach(k => delete symbolMap[k]);
   symbolIndex = 0;
@@ -1479,7 +1651,7 @@ if (status === "delivered") {
 
     const symbol = getSymbol(key);
 
-    if (!routeDayGroups[key]) routeDayGroups[key] = { layers: [] };
+    ensureRouteDayGroup(key);
 
   // Build full street address safely
 const fullAddress = [
@@ -1503,8 +1675,7 @@ const popupContent = `
 `;
 
 const marker = createMarker(lat, lon, symbol)
-  .bindPopup(popupContent)
-  .addTo(map);
+  .bindPopup(popupContent);
 // ===== STREET LABEL (ZOOM-BASED) =====
 const streetNumber = row["CSADR#"] ? String(row["CSADR#"]).trim() : "";
 const streetName = row["CSSTRT"] ? String(row["CSSTRT"]).trim() : "";
@@ -1537,7 +1708,7 @@ if (status === "delivered") {
 }
 
     
-    routeDayGroups[key].layers.push(marker);
+    addMarkerToRouteDayGroup(key, marker);
     routeSet.add(route);
     globalBounds.extend([lat, lon]);
   });
@@ -3145,7 +3316,7 @@ if (resetBtn) {
 
     // 3. Remove ALL markers from map
     Object.values(routeDayGroups).forEach(group => {
-      group.layers.forEach(marker => map.removeLayer(marker));
+      removeRouteDayGroupFromMap(group);
     });
 
     // 4. Clear stored marker groups & symbols
@@ -3610,14 +3781,11 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
 
       row.del_status = "Delivered";
 
-      routeDayGroups[key].layers =
-        routeDayGroups[key].layers.filter(l => l !== marker);
+      removeMarkerFromRouteDayGroup(key, marker);
 
       const deliveredKey = `${row.NEWROUTE}|Delivered`;
 
-      if (!routeDayGroups[deliveredKey]) {
-        routeDayGroups[deliveredKey] = { layers: [] };
-      }
+      ensureRouteDayGroup(deliveredKey);
 
       marker.setStyle?.({
         color: "#00FF00",
@@ -3626,7 +3794,7 @@ Object.entries(routeDayGroups).forEach(([key, group]) => {
         opacity: 1
       });
 
-      routeDayGroups[deliveredKey].layers.push(marker);
+      addMarkerToRouteDayGroup(deliveredKey, marker);
 
       completedCount++;
     }
@@ -3723,15 +3891,12 @@ async function undoDelivered() {
         row.del_status = "";
 
         // remove marker from Delivered layer
-        routeDayGroups[key].layers =
-          routeDayGroups[key].layers.filter(l => l !== marker);
+        removeMarkerFromRouteDayGroup(key, marker);
 
       // restore original route/day layer
 const originalKey = `${row.NEWROUTE}|${row.NEWDAY}`;
 
-if (!routeDayGroups[originalKey]) {
-  routeDayGroups[originalKey] = { layers: [] };
-}
+ensureRouteDayGroup(originalKey);
 
 const symbol = getSymbol(originalKey);
 
@@ -3742,7 +3907,7 @@ marker.setStyle?.({
   opacity: 1
 });
 
-routeDayGroups[originalKey].layers.push(marker);
+addMarkerToRouteDayGroup(originalKey, marker);
 
 undoCount++;
               }
@@ -3900,6 +4065,7 @@ document.getElementById("completeStopsBtnMobile")
   
   listFiles();
 }
+
 
 
 
