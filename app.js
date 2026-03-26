@@ -793,11 +793,60 @@ function createMarker(lat, lon, symbol) {
 
 
 // ================= FILTER CHECKBOX UI =================
+function tokenizeRouteCode(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return [];
+  return text.match(/[A-Za-z]+|\d+|[^A-Za-z\d]+/g) || [text];
+}
+
+function compareRouteCodes(a, b) {
+  const left = String(a ?? "").trim();
+  const right = String(b ?? "").trim();
+
+  if (!left && !right) return 0;
+  if (!left) return 1;
+  if (!right) return -1;
+
+  const leftTokens = tokenizeRouteCode(left);
+  const rightTokens = tokenizeRouteCode(right);
+  const maxLen = Math.max(leftTokens.length, rightTokens.length);
+
+  for (let i = 0; i < maxLen; i += 1) {
+    const leftToken = leftTokens[i];
+    const rightToken = rightTokens[i];
+
+    if (leftToken === undefined) return -1;
+    if (rightToken === undefined) return 1;
+
+    const leftIsNumber = /^\d+$/.test(leftToken);
+    const rightIsNumber = /^\d+$/.test(rightToken);
+
+    if (leftIsNumber && rightIsNumber) {
+      const numberDiff = Number(leftToken) - Number(rightToken);
+      if (numberDiff !== 0) return numberDiff;
+
+      const widthDiff = leftToken.length - rightToken.length;
+      if (widthDiff !== 0) return widthDiff;
+      continue;
+    }
+
+    if (leftIsNumber !== rightIsNumber) {
+      return leftIsNumber ? -1 : 1;
+    }
+
+    const tokenDiff = leftToken.localeCompare(rightToken, undefined, { sensitivity: "base" });
+    if (tokenDiff !== 0) return tokenDiff;
+  }
+
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+}
+
 function buildRouteCheckboxes(routes) {
   const c = document.getElementById("routeCheckboxes");
   c.innerHTML = "";
+  const sortedRoutes = [...routes].sort(compareRouteCodes);
 
-  routes.forEach(route => {
+  sortedRoutes.forEach(route => {
     const label = document.createElement("label");
 
     const checkbox = document.createElement("input");
@@ -1135,7 +1184,7 @@ function buildRouteDayLayerControls() {
   const sortedRouteDayEntries = Object.entries(routeDayGroups).sort(([aKey], [bKey]) => {
     const [aRoute = "", aDay = ""] = aKey.split("|");
     const [bRoute = "", bDay = ""] = bKey.split("|");
-    const routeCmp = aRoute.localeCompare(bRoute, undefined, { numeric: true, sensitivity: "base" });
+    const routeCmp = compareRouteCodes(aRoute, bRoute);
     if (routeCmp !== 0) return routeCmp;
     return daySortRank(aDay) - daySortRank(bDay);
   });
