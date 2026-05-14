@@ -1707,6 +1707,10 @@ function showRouteSummary(rows, headers) {
   const btn = document.getElementById("summaryToggleBtn");
 
   if (!tableBox || !panel || !btn) return;
+  if (typeof window._routeSummaryTableLayoutCleanup === "function") {
+    window._routeSummaryTableLayoutCleanup();
+    window._routeSummaryTableLayoutCleanup = null;
+  }
 
   tableBox.innerHTML = "";
   window._summaryRows = Array.isArray(rows) ? rows : [];
@@ -1722,18 +1726,133 @@ function showRouteSummary(rows, headers) {
   const tbody = document.createElement("tbody");
 
   const headerRow = document.createElement("tr");
-  headers.forEach(h => {
+  const headerCells = [];
+  const columnCells = headers.map(() => []);
+  const highlightedColumnIndexes = new Set();
+  const frozenColumnIndexes = new Set();
+
+  const updateColumnHighlightState = () => {
+    headerCells.forEach((thNode, idx) => {
+      const isActive = highlightedColumnIndexes.has(idx);
+      thNode.classList.toggle("summary-column-active-header", isActive);
+      thNode.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+
+    columnCells.forEach((cells, idx) => {
+      const isActive = highlightedColumnIndexes.has(idx);
+      cells.forEach(cell => {
+        cell.classList.toggle("summary-column-highlight", isActive);
+      });
+    });
+  };
+
+  const updateFrozenColumnState = () => {
+    headerCells.forEach((thNode, idx) => {
+      const isFrozen = frozenColumnIndexes.has(idx);
+      thNode.classList.toggle("summary-column-frozen-header", isFrozen);
+      if (!isFrozen) {
+        thNode.style.left = "";
+        thNode.style.zIndex = "";
+      }
+    });
+
+    columnCells.forEach((cells, idx) => {
+      const isFrozen = frozenColumnIndexes.has(idx);
+      cells.forEach(cell => {
+        cell.classList.toggle("summary-column-frozen-cell", isFrozen);
+        if (!isFrozen) {
+          cell.style.left = "";
+          cell.style.zIndex = "";
+        }
+      });
+    });
+
+    let leftOffset = 0;
+    [...frozenColumnIndexes]
+      .sort((a, b) => a - b)
+      .forEach(columnIndex => {
+        const thNode = headerCells[columnIndex];
+        if (!thNode) return;
+
+        const thisLeft = Math.round(leftOffset);
+        const width = thNode.getBoundingClientRect().width || thNode.offsetWidth || 0;
+
+        thNode.style.left = `${thisLeft}px`;
+        thNode.style.zIndex = "6";
+
+        columnCells[columnIndex].forEach(cell => {
+          cell.style.left = `${thisLeft}px`;
+          cell.style.zIndex = "3";
+        });
+
+        leftOffset += width;
+      });
+  };
+
+  const toggleColumnHighlight = columnIndex => {
+    if (highlightedColumnIndexes.has(columnIndex)) {
+      highlightedColumnIndexes.delete(columnIndex);
+    } else {
+      highlightedColumnIndexes.add(columnIndex);
+    }
+    updateColumnHighlightState();
+  };
+
+  const toggleColumnFrozen = columnIndex => {
+    if (frozenColumnIndexes.has(columnIndex)) {
+      frozenColumnIndexes.delete(columnIndex);
+    } else {
+      frozenColumnIndexes.add(columnIndex);
+    }
+    updateFrozenColumnState();
+  };
+
+  headers.forEach((h, colIndex) => {
     const th = document.createElement("th");
     th.textContent = h ?? "";
+    th.classList.add("summary-column-selectable");
+    th.setAttribute("tabindex", "0");
+    th.setAttribute("role", "button");
+    th.setAttribute("aria-pressed", "false");
+
+    const headerLabel = String(h ?? "").trim() || `Column ${colIndex + 1}`;
+    th.setAttribute("aria-label", `Highlight ${headerLabel}. Control or Command click to freeze.`);
+    th.title = `Click to highlight ${headerLabel}. Ctrl/Cmd+Click to freeze.`;
+
+    th.addEventListener("click", event => {
+      if (event.ctrlKey || event.metaKey) {
+        toggleColumnFrozen(colIndex);
+        return;
+      }
+      toggleColumnHighlight(colIndex);
+    });
+    th.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) {
+          toggleColumnFrozen(colIndex);
+          return;
+        }
+        toggleColumnHighlight(colIndex);
+        return;
+      }
+      if (String(event.key || "").toLowerCase() === "f") {
+        event.preventDefault();
+        toggleColumnFrozen(colIndex);
+      }
+    });
+
+    headerCells.push(th);
     headerRow.appendChild(th);
   });
   thead.appendChild(headerRow);
 
   rows.forEach(r => {
     const tr = document.createElement("tr");
-    headers.forEach(h => {
+    headers.forEach((h, colIndex) => {
       const td = document.createElement("td");
       td.textContent = r[h] ?? "";
+      columnCells[colIndex].push(td);
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
@@ -1742,6 +1861,27 @@ function showRouteSummary(rows, headers) {
   table.appendChild(thead);
   table.appendChild(tbody);
   tableBox.appendChild(table);
+
+  const syncFrozenColumns = () => {
+    if (!frozenColumnIndexes.size) return;
+    updateFrozenColumnState();
+  };
+  const handleWindowResize = () => {
+    window.requestAnimationFrame(syncFrozenColumns);
+  };
+
+  let tableResizeObserver = null;
+  if (typeof ResizeObserver !== "undefined") {
+    tableResizeObserver = new ResizeObserver(() => {
+      window.requestAnimationFrame(syncFrozenColumns);
+    });
+    tableResizeObserver.observe(table);
+  }
+  window.addEventListener("resize", handleWindowResize);
+  window._routeSummaryTableLayoutCleanup = () => {
+    window.removeEventListener("resize", handleWindowResize);
+    if (tableResizeObserver) tableResizeObserver.disconnect();
+  };
 
   const savedHeight = Number(storageGet("summaryHeight"));
   const defaultHeight = window.innerWidth <= 900 ? 300 : 250;

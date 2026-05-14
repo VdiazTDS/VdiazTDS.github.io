@@ -4795,7 +4795,7 @@ body.sun-mode #selectionBox .street-toggle-label {
 
 #routeSummaryTable table {
   border-radius: 10px;
-  overflow: hidden;
+  overflow: visible;
   background: #1a2530;
 }
 
@@ -4822,6 +4822,38 @@ body.sun-mode #selectionBox .street-toggle-label {
 
 #routeSummaryTable tbody tr:hover {
   background: rgba(66, 165, 245, 0.12);
+}
+
+#routeSummaryTable th.summary-column-selectable {
+  cursor: pointer;
+  user-select: none;
+}
+
+#routeSummaryTable th.summary-column-selectable:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(118, 188, 245, 0.65);
+}
+
+#routeSummaryTable th.summary-column-active-header {
+  background: #35516b;
+}
+
+#routeSummaryTable td.summary-column-highlight {
+  background: rgba(86, 160, 224, 0.18);
+}
+
+#routeSummaryTable th.summary-column-frozen-header {
+  box-shadow: inset -1px 0 0 #5d7590, 3px 0 8px rgba(6, 14, 22, 0.34);
+}
+
+#routeSummaryTable td.summary-column-frozen-cell {
+  position: sticky;
+  background: #1d2b38;
+  box-shadow: inset -1px 0 0 #3a5268;
+}
+
+#routeSummaryTable td.summary-column-frozen-cell.summary-column-highlight {
+  background: rgba(86, 160, 224, 0.24);
 }
 
 #routeSummaryTable tbody tr.summary-route-day-row {
@@ -4931,9 +4963,27 @@ body.sun-mode #routeSummaryTable th {
   border-color: #c6d8ea !important;
 }
 
+body.sun-mode #routeSummaryTable th.summary-column-active-header {
+  background: #d7e7f8 !important;
+}
+
+body.sun-mode #routeSummaryTable th.summary-column-frozen-header {
+  background: #dceaf7 !important;
+  box-shadow: inset -1px 0 0 #c0d4e8, 3px 0 8px rgba(65, 95, 126, 0.16) !important;
+}
+
 body.sun-mode #routeSummaryTable td {
   color: #1e3a56 !important;
   border-color: #d2e0ee !important;
+}
+
+body.sun-mode #routeSummaryTable td.summary-column-frozen-cell {
+  background: #f5faff !important;
+  box-shadow: inset -1px 0 0 #cbdced !important;
+}
+
+body.sun-mode #routeSummaryTable td.summary-column-highlight {
+  background: #dff0ff !important;
 }
 
 body.sun-mode #routeSummaryTable tbody tr:nth-child(even) {
