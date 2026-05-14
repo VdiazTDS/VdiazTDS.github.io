@@ -373,12 +373,16 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 // ================= FILE NAME MATCHING =================
 // Makes route files and route summary files match even if
 // spacing, punctuation, or "RouteSummary" text is different.
+function isRouteSummaryFileName(name) {
+  return String(name || "").toLowerCase().includes("summary");
+}
+
 function normalizeName(name) {
-  return name
+  return String(name || "")
     .toLowerCase()
-    .replace(".xlsx", "")
-    .replace("route summary", "")   // handles "Route Summary"
-    .replace("routesummary", "")    // handles "RouteSummary"
+    .replace(/\.(xlsx|xlsm|xls)$/i, "")
+    .replace(/route[\s._-]*summary/g, "") // handles RouteSummary, Route Summary, Route_Summary, etc.
+    .replace(/summary/g, "") // handles files named with just "Summary"
     .replace(/[_\s.-]/g, "")        // ignore spaces, _, ., -
     .trim();
 }
@@ -1784,9 +1788,9 @@ async function listFiles() {
 
  // Separate route files and summary files
 data.forEach(file => {
-  const name = file.name.toLowerCase();
+  const name = file.name;
 
-  if (name.includes("routesummary")) {
+  if (isRouteSummaryFileName(name)) {
     summaryFiles[normalizeName(name)] = file.name;
   } else {
     routeFiles[normalizeName(name)] = file.name;
@@ -2034,15 +2038,11 @@ async function loadSummaryFor(routeFileName) {
   console.log("NORMALIZED ROUTE:", normalizedRoute);
 
   const summary = data.find(f => {
-    const lower = f.name.toLowerCase();
     const normalizedSummary = normalizeName(f.name);
 
     console.log("CHECKING:", f.name, "→", normalizedSummary);
 
-    return (
-      lower.includes("routesummary") ||
-      lower.includes("route summary")
-    ) && normalizedSummary === normalizedRoute;
+    return isRouteSummaryFileName(f.name) && normalizedSummary === normalizedRoute;
   });
 
   console.log("FOUND SUMMARY:", summary);
