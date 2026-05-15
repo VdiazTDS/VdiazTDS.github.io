@@ -302,8 +302,8 @@ window.getTdsPakDiagnosticsReport = buildAppDiagnosticsReport;
 
 // Header tools menu links (shared by all app pages).
 const HEADER_TOOL_LINKS = [
-  { label: "Cart Delivery App", href: "./index.html" },
-  { label: "Sales-Polygon Viewer", href: "./sales-polygon-viewer.html" },
+  { label: "Cart Delivery App", href: "https://vdiaztds.github.io/cartdelivery/" },
+  { label: "Sales-Polygon Viewer", href: "https://vdiaztds.github.io/Sales-Polygons-Viewer/" },
   { label: "Solution Reviewer", href: "./solution-reviewer.html" },
   { label: "TDS-PAK", href: "./tds-pak.html" }
 ];
