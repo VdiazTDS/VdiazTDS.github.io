@@ -198,9 +198,67 @@
       </span>
     </label>
 
+    <div class="filter-group historic-traffic-group">
+      <div class="filter-header collapsible-header" id="historicTrafficLayerToggleHeader">
+        <div class="days-title">
+          <span class="arrow">&#9654;</span>
+          <strong>Estimated Historic Traffic</strong>
+        </div>
+      </div>
+      <div id="historicTrafficLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master historic-traffic-master">
+          <input type="checkbox" id="historicTrafficLayerEnabled" />
+          Show Estimated Traffic
+        </label>
+        <div class="historic-traffic-grid">
+          <label class="historic-traffic-field">
+            <span>Day</span>
+            <select id="historicTrafficDaySelect">
+              <option value="weekday">Typical Weekday</option>
+              <option value="monday">Monday</option>
+              <option value="tuesday">Tuesday</option>
+              <option value="wednesday">Wednesday</option>
+              <option value="thursday">Thursday</option>
+              <option value="friday">Friday</option>
+              <option value="saturday">Saturday</option>
+              <option value="sunday">Sunday</option>
+            </select>
+          </label>
+          <label class="historic-traffic-field">
+            <span>Time</span>
+            <select id="historicTrafficTimeBandSelect">
+              <option value="early">12:00 AM - 5:59 AM</option>
+              <option value="amPeak">6:00 AM - 8:59 AM</option>
+              <option value="midday">9:00 AM - 2:29 PM</option>
+              <option value="schoolPm">2:30 PM - 3:59 PM</option>
+              <option value="pmPeak">4:00 PM - 6:59 PM</option>
+              <option value="evening">7:00 PM - 9:59 PM</option>
+              <option value="night">10:00 PM - 11:59 PM</option>
+            </select>
+          </label>
+        </div>
+        <div class="historic-traffic-actions">
+          <button id="historicTrafficLoadCurrentViewBtn" class="mini-btn" type="button">Load Major Roads</button>
+          <button id="historicTrafficClearPublicRoadsBtn" class="mini-btn" type="button">Clear Public Roads</button>
+          <button id="historicTrafficInfoBtn" class="mini-btn historic-traffic-info-btn" type="button">Traffic Data Info</button>
+        </div>
+        <div class="historic-traffic-method-note">
+          No-backend loading shows major roads only. Street Backend loading can show every road in the selected area.
+        </div>
+        <div class="historic-traffic-legend" aria-label="Historic traffic legend">
+          <span><i class="traffic-free"></i>Free</span>
+          <span><i class="traffic-light"></i>Light</span>
+          <span><i class="traffic-moderate"></i>Moderate</span>
+          <span><i class="traffic-heavy"></i>Heavy</span>
+          <span><i class="traffic-severe"></i>Severe</span>
+        </div>
+        <div id="historicTrafficLayerStatus" class="service-day-label-empty historic-traffic-status">
+          Load street segments first, then turn on historic traffic.
+        </div>
+      </div>
+    </div>
 
-    
-    
+
 <div class="filter-group">
   <div class="filter-header collapsible-header" id="routeDayToggle">
     <div class="routes-title">
@@ -308,8 +366,47 @@
           <input type="checkbox" id="sequenceLayerEnabled" />
           Show Sequence Layer
         </label>
+        <label class="sequence-layer-field">
+          <span>Sequence Field</span>
+          <select id="sequenceLayerFieldSelect">
+            <option value="NEWSEQ">Newseq</option>
+            <option value="SEQNO">SeqNo</option>
+          </select>
+        </label>
         <div id="sequenceLayerStatus" class="service-day-label-empty sequence-layer-status">
-          Run Sequence to generate route arrows.
+          Select Newseq or SeqNo to draw route arrows.
+        </div>
+      </div>
+    </div>
+
+    <div class="filter-group txdot-traffic-counts-group">
+      <div class="filter-header collapsible-header" id="txdotTrafficCountsLayerToggleHeader">
+        <div class="days-title">
+          <span class="arrow">&#9654;</span>
+          <strong>TxDOT Measured Traffic Counts</strong>
+        </div>
+      </div>
+      <div id="txdotTrafficCountsLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master txdot-traffic-counts-master">
+          <input type="checkbox" id="txdotTrafficCountsLayerEnabled" />
+          Show TxDOT Counts
+        </label>
+        <div class="txdot-traffic-counts-note">
+          Free measured AADT station counts from TxDOT. These are traffic volumes, not speed or congestion readings.
+        </div>
+        <div class="txdot-traffic-counts-legend" aria-label="TxDOT traffic counts legend">
+          <span><i class="txdot-count-low"></i>&lt; 10k</span>
+          <span><i class="txdot-count-moderate"></i>10k-25k</span>
+          <span><i class="txdot-count-high"></i>25k-75k</span>
+          <span><i class="txdot-count-very-high"></i>75k-150k</span>
+          <span><i class="txdot-count-extreme"></i>150k+</span>
+        </div>
+        <div class="txdot-traffic-counts-actions">
+          <button id="txdotTrafficCountsRefreshBtn" class="mini-btn" type="button">Load Current View</button>
+          <button id="txdotTrafficCountsInfoBtn" class="mini-btn" type="button">Data Info</button>
+        </div>
+        <div id="txdotTrafficCountsLayerStatus" class="service-day-label-empty txdot-traffic-counts-status">
+          Layer is off.
         </div>
       </div>
     </div>

@@ -373,8 +373,9 @@ function updateSunToggleText() {
   sunToggleText.textContent = sunToggle.checked ? "Light Mode" : "Dark Mode";
 }
 
-// Load saved preference
-if (storageGet("sunMode") === "on") {
+// Load saved preference; first-time visitors default to light mode.
+const savedSunMode = storageGet("sunMode");
+if (savedSunMode === "on" || savedSunMode === null) {
   document.body.classList.add("sun-mode");
   if (sunToggle) sunToggle.checked = true;
 }
@@ -1304,6 +1305,7 @@ const ROUTE_DAY_PANE = "routeDayPane";
 const STREET_NETWORK_PANE = "streetNetworkPane";
 const SEQUENCE_PANE = "sequencePane";
 const CITY_LIMITS_PANE = "cityLimitsPane";
+const TXDOT_TRAFFIC_COUNTS_PANE = "txdotTrafficCountsPane";
 const routeDayPane = map.createPane(ROUTE_DAY_PANE);
 if (routeDayPane) routeDayPane.style.zIndex = "380";
 const streetNetworkPane = map.createPane(STREET_NETWORK_PANE);
@@ -1318,11 +1320,14 @@ if (cityLimitsPane) {
   cityLimitsPane.style.zIndex = "365";
   cityLimitsPane.style.pointerEvents = "none";
 }
+const txdotTrafficCountsPane = map.createPane(TXDOT_TRAFFIC_COUNTS_PANE);
+if (txdotTrafficCountsPane) txdotTrafficCountsPane.style.zIndex = "378";
 // Shared Canvas renderer for high-performance drawing
 const canvasRenderer = L.canvas({ padding: 0.5, pane: ROUTE_DAY_PANE });
 // Keep all street casings under all street centerlines to prevent visual cut-outs.
 const streetCasingCanvasRenderer = L.canvas({ padding: 0.5, pane: STREET_NETWORK_PANE });
 const streetCenterCanvasRenderer = L.canvas({ padding: 0.5, pane: STREET_NETWORK_PANE });
+const txdotTrafficCountsRenderer = L.canvas({ padding: 0.5, pane: TXDOT_TRAFFIC_COUNTS_PANE });
 
 
 // ===== BASE MAP LAYERS =====
@@ -1396,6 +1401,7 @@ let multiDaySidebarUiRenderer = null;
 const cityLimitsLayerGroup = L.layerGroup();
 const streetAttributeLayerGroup = L.layerGroup();
 const texasLandfillsLayerGroup = L.layerGroup();
+const txdotTrafficCountsLayerGroup = L.layerGroup();
 const routeSequencerFacilitiesLayerGroup = L.layerGroup().addTo(map);
 const streetLoadPolygonLayerGroup = new L.FeatureGroup();
 map.addLayer(streetLoadPolygonLayerGroup);
@@ -1462,6 +1468,89 @@ const STREET_SYMBOLOGY_PALETTE = [
   "#eab308",
   "#3b82f6"
 ];
+const HISTORIC_TRAFFIC_LAYER_VISIBLE_KEY = "historicTrafficLayerVisible";
+const HISTORIC_TRAFFIC_DAY_KEY = "historicTrafficDay";
+const HISTORIC_TRAFFIC_TIME_BAND_KEY = "historicTrafficTimeBand";
+const HISTORIC_TRAFFIC_PUBLIC_STREETS_KEY = "historicTrafficPublicStreets";
+const HISTORIC_TRAFFIC_PUBLIC_CACHE_TTL_MS = 10 * 60 * 1000;
+const HISTORIC_TRAFFIC_FAST_MAX_SPAN_DEG = 0.9;
+const HISTORIC_TRAFFIC_DEFAULT_DAY = "weekday";
+const HISTORIC_TRAFFIC_DEFAULT_TIME_BAND = "amPeak";
+const HISTORIC_TRAFFIC_TIME_BANDS = Object.freeze({
+  early: { label: "12:00 AM - 5:59 AM", baseIndex: 18 },
+  amPeak: { label: "6:00 AM - 8:59 AM", baseIndex: 52 },
+  midday: { label: "9:00 AM - 2:29 PM", baseIndex: 28 },
+  schoolPm: { label: "2:30 PM - 3:59 PM", baseIndex: 42 },
+  pmPeak: { label: "4:00 PM - 6:59 PM", baseIndex: 58 },
+  evening: { label: "7:00 PM - 9:59 PM", baseIndex: 24 },
+  night: { label: "10:00 PM - 11:59 PM", baseIndex: 8 }
+});
+const HISTORIC_TRAFFIC_DAY_FACTORS = Object.freeze({
+  weekday: { label: "Typical Weekday", factor: 1 },
+  monday: { label: "Monday", factor: 0.94 },
+  tuesday: { label: "Tuesday", factor: 1 },
+  wednesday: { label: "Wednesday", factor: 1.02 },
+  thursday: { label: "Thursday", factor: 1.04 },
+  friday: { label: "Friday", factor: 1.08 },
+  saturday: { label: "Saturday", factor: 0.74 },
+  sunday: { label: "Sunday", factor: 0.58 }
+});
+const HISTORIC_TRAFFIC_BASE_SPEEDS_MPH = Object.freeze({
+  motorway: 65,
+  motorway_link: 42,
+  trunk: 60,
+  trunk_link: 38,
+  primary: 50,
+  primary_link: 34,
+  secondary: 42,
+  secondary_link: 30,
+  tertiary: 36,
+  tertiary_link: 28,
+  residential: 25,
+  unclassified: 28,
+  living_street: 15,
+  service: 18,
+  road: 28,
+  track: 16,
+  "1": 60,
+  "2": 50,
+  "3": 40,
+  "4": 32,
+  "5": 25
+});
+const HISTORIC_TRAFFIC_CLASS_WEIGHTS = Object.freeze({
+  motorway: 1.04,
+  motorway_link: 0.88,
+  trunk: 1,
+  trunk_link: 0.86,
+  primary: 0.94,
+  primary_link: 0.8,
+  secondary: 0.84,
+  secondary_link: 0.74,
+  tertiary: 0.74,
+  tertiary_link: 0.68,
+  residential: 0.58,
+  unclassified: 0.68,
+  living_street: 0.42,
+  service: 0.38,
+  road: 0.7,
+  track: 0.34,
+  "1": 1.04,
+  "2": 0.94,
+  "3": 0.82,
+  "4": 0.64,
+  "5": 0.52
+});
+const HISTORIC_TRAFFIC_SEVERITY_STYLES = Object.freeze([
+  { key: "free", label: "Free", min: 0, color: "#22c55e" },
+  { key: "light", label: "Light", min: 22, color: "#d9cc2f" },
+  { key: "moderate", label: "Moderate", min: 38, color: "#f59e0b" },
+  { key: "heavy", label: "Heavy", min: 58, color: "#ef4444" },
+  { key: "severe", label: "Severe", min: 75, color: "#9f1239" }
+]);
+const HISTORIC_TRAFFIC_MAJOR_HIGHWAY_RX = "^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link)$";
+let historicTrafficPublicStreetMode = storageGet(HISTORIC_TRAFFIC_PUBLIC_STREETS_KEY) === "on";
+const historicTrafficPublicTileCache = new Map();
 
 function darkenStreetHexColor(colorHex, amount = 0.55) {
   const text = String(colorHex || "").trim();
@@ -1471,6 +1560,667 @@ function darkenStreetHexColor(colorHex, amount = 0.55) {
   const g = Math.max(0, Math.min(255, Math.round(parseInt(text.slice(3, 5), 16) * factor)));
   const b = Math.max(0, Math.min(255, Math.round(parseInt(text.slice(5, 7), 16) * factor)));
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
+function normalizeHistoricTrafficDay(value) {
+  const key = String(value || "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(HISTORIC_TRAFFIC_DAY_FACTORS, key)
+    ? key
+    : HISTORIC_TRAFFIC_DEFAULT_DAY;
+}
+
+function normalizeHistoricTrafficTimeBand(value) {
+  const key = String(value || "").trim();
+  return Object.prototype.hasOwnProperty.call(HISTORIC_TRAFFIC_TIME_BANDS, key)
+    ? key
+    : HISTORIC_TRAFFIC_DEFAULT_TIME_BAND;
+}
+
+function getHistoricTrafficSelectedDay() {
+  const selectValue = document.getElementById("historicTrafficDaySelect")?.value;
+  return normalizeHistoricTrafficDay(selectValue || storageGet(HISTORIC_TRAFFIC_DAY_KEY));
+}
+
+function getHistoricTrafficSelectedTimeBand() {
+  const selectValue = document.getElementById("historicTrafficTimeBandSelect")?.value;
+  return normalizeHistoricTrafficTimeBand(selectValue || storageGet(HISTORIC_TRAFFIC_TIME_BAND_KEY));
+}
+
+function isHistoricTrafficLayerEnabled() {
+  return !!document.getElementById("historicTrafficLayerEnabled")?.checked;
+}
+
+function isHistoricTrafficPublicStreetModeActive() {
+  return historicTrafficPublicStreetMode && isHistoricTrafficLayerEnabled();
+}
+
+function shouldShowStreetLayerForHistoricTraffic() {
+  return isHistoricTrafficPublicStreetModeActive() && streetAttributeById.size > 0;
+}
+
+function setHistoricTrafficPublicStreetMode(enabled) {
+  historicTrafficPublicStreetMode = !!enabled;
+  storageSet(HISTORIC_TRAFFIC_PUBLIC_STREETS_KEY, historicTrafficPublicStreetMode ? "on" : "off");
+}
+
+function parseHistoricTrafficSpeedMph(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text || text === "none" || text === "signals") return null;
+  const match = text.match(/(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  if (/(km\/h|kph|kmh)/i.test(text)) return numeric * 0.621371;
+  return numeric;
+}
+
+function getHistoricTrafficRoadClass(row) {
+  const highway = String(row?.highway || "").trim().toLowerCase();
+  if (highway && Object.prototype.hasOwnProperty.call(HISTORIC_TRAFFIC_BASE_SPEEDS_MPH, highway)) return highway;
+  const funcClass = String(row?.func_class || "").trim().toLowerCase();
+  if (funcClass && Object.prototype.hasOwnProperty.call(HISTORIC_TRAFFIC_BASE_SPEEDS_MPH, funcClass)) return funcClass;
+  return highway || funcClass || "road";
+}
+
+function getHistoricTrafficBaseSpeedMph(row) {
+  const maxSpeed = parseHistoricTrafficSpeedMph(row?.maxspeed);
+  if (Number.isFinite(maxSpeed)) return Math.max(5, Math.min(85, maxSpeed));
+  const roadClass = getHistoricTrafficRoadClass(row);
+  const classSpeed = HISTORIC_TRAFFIC_BASE_SPEEDS_MPH[roadClass];
+  return Number.isFinite(classSpeed) ? classSpeed : HISTORIC_TRAFFIC_BASE_SPEEDS_MPH.road;
+}
+
+function getHistoricTrafficStreetVariance(row) {
+  const seed = String(row?.id ?? row?.name ?? row?.ref ?? "");
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = ((hash << 5) - hash) + seed.charCodeAt(i);
+    hash |= 0;
+  }
+  return (Math.abs(hash) % 11) - 5;
+}
+
+function getHistoricTrafficSeverity(index) {
+  const value = Math.max(0, Math.min(100, Number(index) || 0));
+  let match = HISTORIC_TRAFFIC_SEVERITY_STYLES[0];
+  HISTORIC_TRAFFIC_SEVERITY_STYLES.forEach(style => {
+    if (value >= style.min) match = style;
+  });
+  return match;
+}
+
+function getHistoricTrafficMetricsForEntry(entry) {
+  const row = entry?.row || {};
+  const day = HISTORIC_TRAFFIC_DAY_FACTORS[getHistoricTrafficSelectedDay()] || HISTORIC_TRAFFIC_DAY_FACTORS.weekday;
+  const band = HISTORIC_TRAFFIC_TIME_BANDS[getHistoricTrafficSelectedTimeBand()] || HISTORIC_TRAFFIC_TIME_BANDS.amPeak;
+  const roadClass = getHistoricTrafficRoadClass(row);
+  const roadWeight = Number(HISTORIC_TRAFFIC_CLASS_WEIGHTS[roadClass]) || HISTORIC_TRAFFIC_CLASS_WEIGHTS.road || 0.7;
+  const baseSpeed = getHistoricTrafficBaseSpeedMph(row);
+  const rawIndex = (Number(band.baseIndex) || 0) * (Number(day.factor) || 1) * roadWeight;
+  const measuredTrafficCount = getHistoricTrafficMeasuredVolumeForEntry(entry, roadClass);
+  const measuredFactor = measuredTrafficCount
+    ? getHistoricTrafficAADTFactor(measuredTrafficCount.aadt)
+    : 1;
+  const congestionIndex = Math.max(4, Math.min(88, (rawIndex * measuredFactor) + getHistoricTrafficStreetVariance(row)));
+  const speedMph = Math.max(6, baseSpeed * (1 - ((congestionIndex / 100) * 0.78)));
+  const severity = getHistoricTrafficSeverity(congestionIndex);
+
+  return {
+    roadClass,
+    baseSpeed,
+    speedMph,
+    congestionIndex,
+    severity,
+    measuredTrafficCount,
+    measuredFactor
+  };
+}
+
+function getHistoricTrafficStyleForEntry(entry) {
+  const metrics = getHistoricTrafficMetricsForEntry(entry);
+  const baseWeight = Math.max(STREET_BASE_LINE_WEIGHT, resolveStreetSymbologyWeightForEntry(entry));
+  return {
+    color: metrics.severity.color,
+    weight: Math.min(8, baseWeight + 1.2),
+    opacity: 0.92,
+    casingColor: darkenStreetHexColor(metrics.severity.color, 0.62),
+    casingWeight: Math.min(10, baseWeight + 2.2),
+    casingOpacity: 0.98
+  };
+}
+
+function buildHistoricTrafficSeverityCounts() {
+  const counts = {};
+  HISTORIC_TRAFFIC_SEVERITY_STYLES.forEach(style => {
+    counts[style.key] = 0;
+  });
+  counts.measuredCalibrated = 0;
+  streetAttributeById.forEach(entry => {
+    const metrics = getHistoricTrafficMetricsForEntry(entry);
+    counts[metrics.severity.key] = (counts[metrics.severity.key] || 0) + 1;
+    if (metrics.measuredTrafficCount) counts.measuredCalibrated += 1;
+  });
+  return counts;
+}
+
+function ensureHistoricTrafficLegendControl() {
+  if (window.__historicTrafficLegendControl) return window.__historicTrafficLegendControl;
+  const control = L.control({ position: "bottomright" });
+  control.onAdd = function() {
+    const node = L.DomUtil.create("div", "historic-traffic-map-legend");
+    L.DomEvent.disableClickPropagation(node);
+    return node;
+  };
+  window.__historicTrafficLegendControl = control;
+  return control;
+}
+
+function syncHistoricTrafficLegendControl() {
+  const control = ensureHistoricTrafficLegendControl();
+  const shouldShow = isHistoricTrafficLayerEnabled() && streetAttributeById.size > 0 && map.hasLayer(streetAttributeLayerGroup);
+  if (!shouldShow) {
+    if (control._map) control.remove();
+    return;
+  }
+  if (!control._map) control.addTo(map);
+  const node = control.getContainer?.();
+  if (!node) return;
+  const band = HISTORIC_TRAFFIC_TIME_BANDS[getHistoricTrafficSelectedTimeBand()] || HISTORIC_TRAFFIC_TIME_BANDS.amPeak;
+  const day = HISTORIC_TRAFFIC_DAY_FACTORS[getHistoricTrafficSelectedDay()] || HISTORIC_TRAFFIC_DAY_FACTORS.weekday;
+  const calibratedNote = historicTrafficTxDOTCountState.featureCount > 0
+    ? " + TxDOT AADT"
+    : "";
+  const rows = HISTORIC_TRAFFIC_SEVERITY_STYLES
+    .map(style => `<div class="historic-traffic-map-legend-row"><i class="traffic-${style.key}"></i><span>${style.label}</span></div>`)
+    .join("");
+  node.innerHTML = `<div class="historic-traffic-map-legend-title">Estimated Traffic${calibratedNote}</div><div>${day.label} - ${band.label}</div>${rows}`;
+}
+
+function updateHistoricTrafficLayerStatus(message = "") {
+  const statusNode = document.getElementById("historicTrafficLayerStatus");
+  if (!statusNode) return;
+  if (message) {
+    statusNode.textContent = String(message);
+    return;
+  }
+
+  const enabled = isHistoricTrafficLayerEnabled();
+  const segmentCount = streetAttributeById.size;
+  if (!enabled) {
+    statusNode.textContent = "Layer is off.";
+    return;
+  }
+  if (!segmentCount) {
+    statusNode.textContent = historicTrafficPublicStreetMode
+      ? "Zoom into the area you need, then load major roads in the current view."
+      : "No-backend loading shows major roads only. Street Backend loading can show every road in the selected area.";
+    return;
+  }
+
+  const day = HISTORIC_TRAFFIC_DAY_FACTORS[getHistoricTrafficSelectedDay()] || HISTORIC_TRAFFIC_DAY_FACTORS.weekday;
+  const band = HISTORIC_TRAFFIC_TIME_BANDS[getHistoricTrafficSelectedTimeBand()] || HISTORIC_TRAFFIC_TIME_BANDS.amPeak;
+  const counts = buildHistoricTrafficSeverityCounts();
+  const heavyCount = (counts.heavy || 0) + (counts.severe || 0);
+  const layerVisible = map.hasLayer(streetAttributeLayerGroup);
+  const visibilityNote = layerVisible ? "" : " Street Network Layer is hidden.";
+  const sourceNote = historicTrafficPublicStreetMode && !shouldUseLocalStreetSource()
+    ? " Public road data."
+    : "";
+  const calibrationNote = counts.measuredCalibrated > 0
+    ? ` ${counts.measuredCalibrated.toLocaleString()} segment(s) calibrated with nearby TxDOT AADT.`
+    : (historicTrafficTxDOTCountState.featureCount > 0 ? " TxDOT AADT loaded, but no route/nearby station matched these segments." : "");
+  statusNode.textContent = `Showing ${segmentCount.toLocaleString()} segments for ${day.label}, ${band.label}. ${heavyCount.toLocaleString()} heavy/severe.${calibrationNote}${sourceNote}${visibilityNote}`;
+}
+
+function refreshHistoricTrafficLayer() {
+  applyStreetSelectionStyles();
+  updateHistoricTrafficLayerStatus();
+  syncHistoricTrafficLegendControl();
+  refreshLayerManagerUiIfOpen();
+}
+
+function makeHistoricTrafficPublicCacheKey(bounds) {
+  const values = [
+    bounds.getSouth(),
+    bounds.getWest(),
+    bounds.getNorth(),
+    bounds.getEast()
+  ].map(v => Number(v).toFixed(4));
+  return `major:${values.join("|")}`;
+}
+
+function buildHistoricTrafficPublicOverpassQuery(bounds) {
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+
+  return `
+[out:json][timeout:10];
+(
+  way["highway"~"${HISTORIC_TRAFFIC_MAJOR_HIGHWAY_RX}"](${south},${west},${north},${east});
+);
+out geom tags;
+`;
+}
+
+function normalizeHistoricTrafficPublicStreetElement(raw) {
+  const id = Number(raw?.id);
+  if (!Number.isFinite(id)) return null;
+  const sourceGeom = Array.isArray(raw?.geom)
+    ? raw.geom
+    : (Array.isArray(raw?.geometry) ? raw.geometry : []);
+  const geom = [];
+  sourceGeom.forEach(pt => {
+    const lat = Array.isArray(pt) ? Number(pt[0]) : Number(pt?.lat);
+    const lon = Array.isArray(pt) ? Number(pt[1]) : Number(pt?.lon ?? pt?.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) geom.push({ lat, lon });
+  });
+  if (geom.length < 2) return null;
+  return {
+    type: "way",
+    id,
+    tags: raw?.tags && typeof raw.tags === "object" ? raw.tags : {},
+    geom
+  };
+}
+
+async function fetchHistoricTrafficPublicRoadsForBounds(bounds) {
+  const key = makeHistoricTrafficPublicCacheKey(bounds);
+  const cached = historicTrafficPublicTileCache.get(key);
+  if (cached && (Date.now() - cached.ts) < HISTORIC_TRAFFIC_PUBLIC_CACHE_TTL_MS) {
+    return cached.elements;
+  }
+
+  const query = buildHistoricTrafficPublicOverpassQuery(bounds);
+  const data = await fetchOverpassJsonWithFallback(query);
+  const elements = (data.elements || [])
+    .map(normalizeHistoricTrafficPublicStreetElement)
+    .filter(element =>
+      element &&
+      element.type === "way" &&
+      isMotorVehicleStreetTags(element.tags || {}) &&
+      Array.isArray(element.geom) &&
+      element.geom.length >= 2
+    );
+  historicTrafficPublicTileCache.set(key, { ts: Date.now(), elements });
+  return elements;
+}
+
+async function loadFastHistoricTrafficPublicRoads() {
+  if (streetLoadInFlight) {
+    updateHistoricTrafficLayerStatus("Roads are already loading. Please wait for the current load to finish.");
+    return;
+  }
+
+  const bounds = map.getBounds();
+  const spanLat = Math.abs(bounds.getNorth() - bounds.getSouth());
+  const spanLng = Math.abs(bounds.getEast() - bounds.getWest());
+  if (Math.max(spanLat, spanLng) > HISTORIC_TRAFFIC_FAST_MAX_SPAN_DEG) {
+    updateHistoricTrafficLayerStatus("Zoom in closer before loading public major roads. Smaller views load much faster.");
+    return;
+  }
+
+  streetLoadInFlight = true;
+  setStreetLoadBarVisible(true);
+  const roadScopeLabel = "major roads";
+  updateHistoricTrafficLayerStatus(`Fast loading public ${roadScopeLabel} and TxDOT AADT counts for this view...`);
+
+  try {
+    const [elements] = await Promise.all([
+      fetchHistoricTrafficPublicRoadsForBounds(bounds),
+      ensureHistoricTrafficTxDOTCountsForBounds(bounds).catch(error => {
+        console.warn("TxDOT AADT calibration load failed:", error);
+        return false;
+      })
+    ]);
+    let addedCount = 0;
+    elements.forEach(element => {
+      if (upsertStreetElement(element)) addedCount += 1;
+    });
+    maybeEnableStreetCasingPerformanceMode();
+    streetAttributesRows = [...streetAttributeById.values()].map(v => v.row);
+    syncStreetNetworkOverlay();
+    if (attributeTableMode === "streets") renderAttributeTable();
+    applyStreetSelectionStyles();
+
+    const totalCount = streetAttributeById.size;
+    if (!elements.length) {
+      updateHistoricTrafficLayerStatus("No public major roads returned for this view. Try zooming in or panning slightly.");
+    } else {
+      const calibrationText = historicTrafficTxDOTCountState.featureCount > 0
+        ? ` TxDOT AADT stations loaded for calibration: ${historicTrafficTxDOTCountState.featureCount.toLocaleString()}.`
+        : "";
+      updateHistoricTrafficLayerStatus(
+        `Loaded ${addedCount.toLocaleString()} new public ${roadScopeLabel} (${totalCount.toLocaleString()} total).${calibrationText}`
+      );
+    }
+  } catch (error) {
+    console.warn("Fast public traffic road load failed:", error);
+    const message = String(error?.message || "");
+    const rateLimited = message.includes("429") || message.includes("509") || message.toLowerCase().includes("cooling down");
+    updateHistoricTrafficLayerStatus(
+      rateLimited
+        ? "Public road providers are rate-limiting. Wait a minute or zoom into a smaller area."
+        : "Unable to fast load public major roads for this view. Try a smaller view."
+    );
+  } finally {
+    streetLoadInFlight = false;
+    setStreetLoadBarVisible(false);
+    pendingStreetReload = false;
+    syncHistoricTrafficLegendControl();
+    refreshLayerManagerUiIfOpen();
+  }
+}
+
+async function loadHistoricTrafficPublicRoadsForCurrentView() {
+  const enabledInput = document.getElementById("historicTrafficLayerEnabled");
+  const layerToggle = document.getElementById("streetNetworkLayerToggle");
+  const loadBtn = document.getElementById("historicTrafficLoadCurrentViewBtn");
+  if (streetLoadInFlight) {
+    updateHistoricTrafficLayerStatus("Roads are already loading. Please wait for the current load to finish.");
+    return;
+  }
+
+  if (enabledInput) enabledInput.checked = true;
+  storageSet(HISTORIC_TRAFFIC_LAYER_VISIBLE_KEY, "on");
+  setHistoricTrafficPublicStreetMode(true);
+  if (layerToggle) {
+    layerToggle.checked = true;
+    storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, "on");
+  }
+  syncStreetNetworkOverlay();
+  updateLocalStreetSourceStatus();
+  updateHistoricTrafficLayerStatus("Loading public major-road geometry for the current map view...");
+
+  if (loadBtn) loadBtn.disabled = true;
+  try {
+    await loadFastHistoricTrafficPublicRoads();
+  } finally {
+    if (loadBtn) loadBtn.disabled = false;
+  }
+}
+
+function clearHistoricTrafficPublicRoads() {
+  if (!historicTrafficPublicStreetMode && !streetAttributeById.size) {
+    updateHistoricTrafficLayerStatus();
+    return;
+  }
+
+  setHistoricTrafficPublicStreetMode(false);
+  if (!shouldUseLocalStreetSource()) {
+    const layerToggle = document.getElementById("streetNetworkLayerToggle");
+    if (layerToggle) {
+      layerToggle.checked = false;
+      storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, "off");
+    }
+    clearRenderedStreetSegmentState();
+  } else {
+    refreshHistoricTrafficLayer();
+  }
+  syncStreetNetworkOverlay();
+  updateLocalStreetSourceStatus();
+  updateHistoricTrafficLayerStatus("Cleared public-road traffic overlay.");
+}
+
+function openHistoricTrafficInfoWindow() {
+  const selectedDay = HISTORIC_TRAFFIC_DAY_FACTORS[getHistoricTrafficSelectedDay()] || HISTORIC_TRAFFIC_DAY_FACTORS.weekday;
+  const selectedBand = HISTORIC_TRAFFIC_TIME_BANDS[getHistoricTrafficSelectedTimeBand()] || HISTORIC_TRAFFIC_TIME_BANDS.amPeak;
+  const sourceMode = historicTrafficPublicStreetMode && !shouldUseLocalStreetSource()
+    ? "No-backend public major-road mode"
+    : "Street Backend / local street source mode";
+  const segmentCount = streetAttributeById.size;
+  const calibrationCounts = buildHistoricTrafficSeverityCounts();
+  const timeRows = Object.values(HISTORIC_TRAFFIC_TIME_BANDS)
+    .map(band => `<li><strong>${band.label}</strong></li>`)
+    .join("");
+
+  const win = window.open("", "historicTrafficInfo", "width=820,height=780,scrollbars=yes,resizable=yes");
+  if (!win) {
+    alert("Pop-up blocked. Allow pop-ups for this site to view traffic data information.");
+    return;
+  }
+
+  win.document.open();
+  win.document.write(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Estimated Historic Traffic Data Info</title>
+        <style>
+          body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f5f7fb;
+            color: #172033;
+            line-height: 1.45;
+          }
+          header {
+            padding: 22px 26px;
+            background: #162233;
+            color: #f7fbff;
+          }
+          h1 {
+            margin: 0 0 6px;
+            font-size: 22px;
+          }
+          header p {
+            margin: 0;
+            color: #c9d7e8;
+          }
+          main {
+            padding: 22px 26px 30px;
+          }
+          section {
+            margin-bottom: 18px;
+            padding: 16px;
+            border: 1px solid #d7e0ea;
+            border-radius: 8px;
+            background: #ffffff;
+          }
+          h2 {
+            margin: 0 0 10px;
+            font-size: 16px;
+            color: #0f2740;
+          }
+          ul {
+            margin: 8px 0 0 20px;
+            padding: 0;
+          }
+          li {
+            margin: 6px 0;
+          }
+          a {
+            color: #0d5f9f;
+            font-weight: 700;
+          }
+          .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+          }
+          .metric {
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #eef5fb;
+            border: 1px solid #d5e4f0;
+          }
+          .metric span {
+            display: block;
+            color: #52687f;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .metric strong {
+            display: block;
+            margin-top: 3px;
+            font-size: 15px;
+          }
+          .note {
+            border-color: #ebc76d;
+            background: #fff8e2;
+          }
+          .muted {
+            color: #5a6f86;
+          }
+        </style>
+      </head>
+      <body>
+        <header>
+          <h1>Estimated Historic Traffic Data Info</h1>
+          <p>How the TDS-PAK traffic layer is derived and how route analysts should interpret it.</p>
+        </header>
+        <main>
+          <section class="summary">
+            <div class="metric"><span>Current Mode</span><strong>${sourceMode}</strong></div>
+            <div class="metric"><span>Current Day</span><strong>${selectedDay.label}</strong></div>
+            <div class="metric"><span>Current Time Range</span><strong>${selectedBand.label}</strong></div>
+            <div class="metric"><span>Loaded Segments</span><strong>${segmentCount.toLocaleString()}</strong></div>
+            <div class="metric"><span>TxDOT Count Stations</span><strong>${historicTrafficTxDOTCountState.featureCount.toLocaleString()}</strong></div>
+            <div class="metric"><span>AADT-Calibrated Segments</span><strong>${(calibrationCounts.measuredCalibrated || 0).toLocaleString()}</strong></div>
+          </section>
+
+          <section class="note">
+            <h2>Coverage Difference</h2>
+            <ul>
+              <li><strong>No-backend mode:</strong> Load Major Roads uses public OpenStreetMap/Overpass road geometry and intentionally loads major road classes only for speed and reliability.</li>
+              <li><strong>Street Backend mode:</strong> If the Street Backend Manager is set up and the selected street source contains local roads, the traffic estimate can be applied to every loaded road in the selected area.</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>Where The Traffic Data Comes From</h2>
+            <ul>
+              <li>This is an estimated historic traffic layer, not a live traffic feed and not an archive of measured probe speeds.</li>
+              <li>The estimate is generated in the browser from loaded road geometry, road class, available max speed, selected day, selected time range, and a deterministic per-road variation.</li>
+              <li>When TxDOT AADT stations are available for the current view, TDS-PAK uses nearby route-matched measured traffic counts to reduce or increase the congestion estimate for that specific road segment.</li>
+              <li>Road geometry comes from either the user's Street Backend/local street source or public OpenStreetMap/Overpass geometry when using Load Major Roads.</li>
+              <li>The color buckets are based on an internal congestion index: Free, Light, Moderate, Heavy, and Severe.</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>Time Ranges</h2>
+            <ul>${timeRows}</ul>
+            <p class="muted">Times are intended as local operating-time windows for planning comparisons.</p>
+          </section>
+
+          <section>
+            <h2>Exact Data Sources And Links</h2>
+            <ul>
+              <li><strong>Measured historic speeds:</strong> TDS-PAK is not currently connected to a measured historic traffic-speed provider. The displayed traffic colors are estimated by TDS-PAK from road attributes and selected day/time settings.</li>
+              <li><strong>Free measured traffic counts:</strong> TDS-PAK uses nearby route-matched TxDOT Annual Average Daily Traffic (AADT) station volumes as a calibration input when available. This is measured volume, not measured speed or congestion. Sources: <a href="${TXDOT_TRAFFIC_COUNTS_SOURCE_PAGE_URL}" target="_blank" rel="noopener">TxDOT Traffic Count Maps</a>, <a href="${TXDOT_TRAFFIC_COUNTS_FEATURE_LAYER_URL}" target="_blank" rel="noopener">TxDOT AADT Annuals Feature Service</a>, and <a href="${TXDOT_TRAFFIC_COUNTS_STARS_URL}" target="_blank" rel="noopener">STARS II information</a>.</li>
+              <li><strong>No-backend road geometry:</strong> Load Major Roads requests public OpenStreetMap road geometry through Overpass. Sources: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap data and license</a> and <a href="https://wiki.openstreetmap.org/wiki/Overpass_API" target="_blank" rel="noopener">Overpass API</a>.</li>
+              <li><strong>Street Backend road geometry:</strong> Street Backend mode uses the street dataset configured in Street Network Manager. If the default Texas setup package/source is used, that road dataset is an OpenStreetMap extract distributed by <a href="https://download.geofabrik.de/north-america/us/texas.html" target="_blank" rel="noopener">Geofabrik Texas downloads</a>.</li>
+              <li><strong>Road classification:</strong> Congestion estimates use each segment's road class, primarily the OpenStreetMap <a href="https://wiki.openstreetmap.org/wiki/Key:highway" target="_blank" rel="noopener">highway tag</a> or the local backend's function-class field when available.</li>
+              <li><strong>Base speed input:</strong> When present, each segment's posted speed uses the OpenStreetMap <a href="https://wiki.openstreetmap.org/wiki/Key:maxspeed" target="_blank" rel="noopener">maxspeed tag</a>; otherwise TDS-PAK falls back to class-based planning speeds.</li>
+              <li><strong>Traffic color estimate:</strong> TDS-PAK combines road class, max speed or class fallback speed, selected day factor, selected time range, nearby TxDOT AADT when available, and a deterministic per-road variation into its internal congestion index: Free, Light, Moderate, Heavy, or Severe.</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2>Known Limitations</h2>
+            <ul>
+              <li>No incident, weather, construction, school calendar, holiday, event, or live closure data is included.</li>
+              <li>TxDOT AADT calibration improves relative volume differences by segment, but it does not provide observed time-of-day speed, delay, or queue length.</li>
+              <li>Public no-backend loading depends on external public OSM/Overpass availability and may be rate-limited.</li>
+              <li>Street Backend coverage depends on the quality and completeness of the configured street source.</li>
+              <li>Road class and max-speed tags may be incomplete or inconsistent in public data.</li>
+            </ul>
+          </section>
+        </main>
+      </body>
+    </html>
+  `);
+  win.document.close();
+  try { win.focus(); } catch (_) {}
+}
+
+function initHistoricTrafficLayerControls() {
+  const header = document.getElementById("historicTrafficLayerToggleHeader");
+  const content = document.getElementById("historicTrafficLayerContent");
+  const enabledInput = document.getElementById("historicTrafficLayerEnabled");
+  const daySelect = document.getElementById("historicTrafficDaySelect");
+  const timeSelect = document.getElementById("historicTrafficTimeBandSelect");
+  const loadCurrentViewBtn = document.getElementById("historicTrafficLoadCurrentViewBtn");
+  const clearPublicRoadsBtn = document.getElementById("historicTrafficClearPublicRoadsBtn");
+  const infoBtn = document.getElementById("historicTrafficInfoBtn");
+  if (!enabledInput || !daySelect || !timeSelect) return;
+  if (enabledInput.dataset.historicTrafficBound === "1") return;
+  enabledInput.dataset.historicTrafficBound = "1";
+
+  const savedDay = normalizeHistoricTrafficDay(storageGet(HISTORIC_TRAFFIC_DAY_KEY));
+  const savedTimeBand = normalizeHistoricTrafficTimeBand(storageGet(HISTORIC_TRAFFIC_TIME_BAND_KEY));
+  daySelect.value = savedDay;
+  timeSelect.value = savedTimeBand;
+  enabledInput.checked = storageGet(HISTORIC_TRAFFIC_LAYER_VISIBLE_KEY) === "on";
+
+  const syncCollapsedArrow = () => {
+    const arrow = header?.querySelector(".arrow");
+    if (!arrow || !content) return;
+    arrow.textContent = content.classList.contains("collapsed") ? "\u25B6" : "\u25BE";
+  };
+
+  header?.addEventListener("click", event => {
+    if (event.target.closest("button,input,select,label")) return;
+    content?.classList.toggle("collapsed");
+    syncCollapsedArrow();
+  });
+
+  enabledInput.addEventListener("change", () => {
+    const publicModeWasActive = historicTrafficPublicStreetMode;
+    storageSet(HISTORIC_TRAFFIC_LAYER_VISIBLE_KEY, enabledInput.checked ? "on" : "off");
+    if (enabledInput.checked) {
+      const layerToggle = document.getElementById("streetNetworkLayerToggle");
+      if (layerToggle && !layerToggle.checked) {
+        layerToggle.checked = true;
+        storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, "on");
+        syncStreetNetworkOverlay();
+      }
+      ensureHistoricTrafficTxDOTCountsForCurrentView()
+        .then(() => refreshHistoricTrafficLayer())
+        .catch(error => {
+          console.warn("Unable to load TxDOT AADT calibration for historic traffic:", error);
+        });
+    } else if (publicModeWasActive) {
+      setHistoricTrafficPublicStreetMode(false);
+      if (!shouldUseLocalStreetSource()) {
+        const layerToggle = document.getElementById("streetNetworkLayerToggle");
+        if (layerToggle) {
+          layerToggle.checked = false;
+          storageSet(STREET_NETWORK_LAYER_VISIBLE_KEY, "off");
+        }
+      }
+    }
+    syncStreetNetworkOverlay();
+    updateLocalStreetSourceStatus();
+    refreshHistoricTrafficLayer();
+  });
+
+  daySelect.addEventListener("change", () => {
+    daySelect.value = normalizeHistoricTrafficDay(daySelect.value);
+    storageSet(HISTORIC_TRAFFIC_DAY_KEY, daySelect.value);
+    refreshHistoricTrafficLayer();
+  });
+
+  timeSelect.addEventListener("change", () => {
+    timeSelect.value = normalizeHistoricTrafficTimeBand(timeSelect.value);
+    storageSet(HISTORIC_TRAFFIC_TIME_BAND_KEY, timeSelect.value);
+    refreshHistoricTrafficLayer();
+  });
+
+  syncCollapsedArrow();
+  loadCurrentViewBtn?.addEventListener("click", () => {
+    loadHistoricTrafficPublicRoadsForCurrentView().catch(error => {
+      console.error("Unable to load public historic traffic roads:", error);
+      updateHistoricTrafficLayerStatus("Unable to load public major-road geometry for this view.");
+    });
+  });
+  clearPublicRoadsBtn?.addEventListener("click", clearHistoricTrafficPublicRoads);
+  infoBtn?.addEventListener("click", openHistoricTrafficInfoWindow);
+  refreshHistoricTrafficLayer();
 }
 const localStreetSourceState = {
   loaded: false,
@@ -1542,6 +2292,37 @@ const TEXAS_LANDFILLS_LAYER_VISIBLE_KEY = "texasLandfillsLayerVisible";
 const TEXAS_LANDFILLS_FEATURE_LAYER_URL = "https://services6.arcgis.com/MhhE5pgCPypps4To/ArcGIS/rest/services/Texas_Landfills_Web_Map/FeatureServer/0";
 const TEXAS_LANDFILLS_QUERY_URL = `${TEXAS_LANDFILLS_FEATURE_LAYER_URL}/query`;
 const TEXAS_LANDFILLS_FETCH_BATCH_SIZE = 180;
+const TXDOT_TRAFFIC_COUNTS_LAYER_VISIBLE_KEY = "txdotTrafficCountsLayerVisible";
+const TXDOT_TRAFFIC_COUNTS_FEATURE_LAYER_URL = "https://services.arcgis.com/KTcxiTD9dsQw4r7Z/arcgis/rest/services/TxDOT_AADT_Annuals_(Public_View)/FeatureServer/0";
+const TXDOT_TRAFFIC_COUNTS_QUERY_URL = `${TXDOT_TRAFFIC_COUNTS_FEATURE_LAYER_URL}/query`;
+const TXDOT_TRAFFIC_COUNTS_ITEM_URL = "https://www.arcgis.com/home/item.html?id=d5f56ecd2b274b4d8dc3c2d6fe067d37";
+const TXDOT_TRAFFIC_COUNTS_SOURCE_PAGE_URL = "https://www.txdot.gov/data-maps/traffic-count-maps.html";
+const TXDOT_TRAFFIC_COUNTS_STARS_URL = "https://www.txdot.gov/data-maps/traffic-count-maps/stars.html.html";
+const TXDOT_TRAFFIC_COUNTS_FETCH_RECORD_LIMIT = 1000;
+const TXDOT_TRAFFIC_COUNTS_MAX_FEATURES = 4000;
+const TXDOT_TRAFFIC_COUNTS_MIN_ZOOM = 8;
+const TXDOT_TRAFFIC_COUNTS_BOUNDS_PAD = 0.03;
+const TXDOT_TRAFFIC_COUNTS_MOVE_REFRESH_DEBOUNCE_MS = 360;
+const TXDOT_TRAFFIC_COUNTS_FIELDS = [
+  "DIST_NM",
+  "CNTY_NM",
+  "TRFC_STATN_ID",
+  "CATEGORY",
+  "ACTIVE",
+  "AADT_RPT_YEAR",
+  "AADT_RPT_QTY",
+  "ON_ROAD",
+  "COUNT_CYCLE",
+  "LATITUDE",
+  "LONGITUDE"
+].join(",");
+const TXDOT_TRAFFIC_COUNT_BUCKETS = Object.freeze([
+  { key: "low", label: "< 10k", min: 0, color: "#22c55e", radius: 4.8 },
+  { key: "moderate", label: "10k-25k", min: 10000, color: "#d9cc2f", radius: 5.8 },
+  { key: "high", label: "25k-75k", min: 25000, color: "#f59e0b", radius: 7.2 },
+  { key: "very-high", label: "75k-150k", min: 75000, color: "#ef4444", radius: 8.8 },
+  { key: "extreme", label: "150k+", min: 150000, color: "#9f1239", radius: 10.5 }
+]);
 const CITY_LIMITS_LAYER_VISIBLE_KEY = "cityLimitsLayerVisible";
 const CITY_LIMITS_FEATURE_LAYER_URL = "https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/USA_Census_Populated_Places/FeatureServer/0";
 const CITY_LIMITS_QUERY_URL = `${CITY_LIMITS_FEATURE_LAYER_URL}/query`;
@@ -1565,6 +2346,237 @@ const texasLandfillsState = {
   lastError: "",
   sourceName: "Texas Landfills Web Map"
 };
+const txdotTrafficCountsState = {
+  loaded: false,
+  loading: false,
+  loadPromise: null,
+  featureCount: 0,
+  lastError: "",
+  lastBoundsKey: "",
+  refreshTimer: null,
+  moveListenerBound: false,
+  zoomListenerBound: false,
+  exceededTransferLimit: false,
+  maxReportYear: null,
+  sourceName: "TxDOT Annual Average Daily Traffic Counts"
+};
+const historicTrafficTxDOTCountState = {
+  loadPromise: null,
+  lastBoundsKey: "",
+  featureCount: 0,
+  maxReportYear: null,
+  lastError: ""
+};
+const historicTrafficTxDOTCountsByRoute = new Map();
+
+function normalizeTxDOTTrafficRouteCode(value) {
+  const text = String(value || "").trim().toUpperCase();
+  if (!text) return "";
+  const direct = text.match(/^(IH|US|SH|FM|RM|SL|LP|TL|PR|SP)(\d{1,4})[A-Z]*$/);
+  if (direct) {
+    const prefix = direct[1] === "LP" ? "SL" : direct[1];
+    return `${prefix}${direct[2].padStart(4, "0")}`;
+  }
+  return "";
+}
+
+function addHistoricTrafficRouteCodeFromMatch(codes, prefix, value) {
+  const numberText = String(value || "").replace(/[^\d]/g, "");
+  if (!numberText) return;
+  const normalizedPrefix = prefix === "LP" ? "SL" : prefix;
+  codes.add(`${normalizedPrefix}${numberText.padStart(4, "0")}`);
+}
+
+function getHistoricTrafficRouteCodesFromText(textValue) {
+  const text = String(textValue || "").toUpperCase();
+  const codes = new Set();
+  const patterns = [
+    { prefix: "IH", rx: /\b(?:I|IH|INTERSTATE)\s*-?\s*(\d{1,4})\b/g },
+    { prefix: "US", rx: /\b(?:US|U\.S\.)\s*-?\s*(\d{1,4})\b/g },
+    { prefix: "SH", rx: /\b(?:SH|TX|TEXAS|STATE\s+HIGHWAY)\s*-?\s*(\d{1,4})\b/g },
+    { prefix: "FM", rx: /\b(?:FM|FARM\s+TO\s+MARKET)\s*-?\s*(\d{1,4})\b/g },
+    { prefix: "RM", rx: /\b(?:RM|RANCH\s+ROAD)\s*-?\s*(\d{1,4})\b/g },
+    { prefix: "SL", rx: /\b(?:SL|LP|LOOP|STATE\s+LOOP)\s*-?\s*(\d{1,4})\b/g },
+    { prefix: "SH", rx: /\b(?:TOLL)\s*-?\s*(\d{1,4})\b/g }
+  ];
+
+  patterns.forEach(({ prefix, rx }) => {
+    rx.lastIndex = 0;
+    let match = rx.exec(text);
+    while (match) {
+      addHistoricTrafficRouteCodeFromMatch(codes, prefix, match[1]);
+      match = rx.exec(text);
+    }
+  });
+  return codes;
+}
+
+function getHistoricTrafficRouteCodesForRow(row) {
+  const codes = new Set();
+  [
+    row?.ref,
+    row?.name,
+    row?.route,
+    row?.on_road,
+    row?.ON_ROAD,
+    row?.road,
+    row?.highway_name
+  ].forEach(value => {
+    const direct = normalizeTxDOTTrafficRouteCode(value);
+    if (direct) codes.add(direct);
+    getHistoricTrafficRouteCodesFromText(value).forEach(code => codes.add(code));
+  });
+  return [...codes];
+}
+
+function isTxDOTTrafficStationAuxiliary(stationId) {
+  const text = String(stationId || "").toUpperCase();
+  return /(NBSR|SBSR|EBSR|WBSR|NBDR|SBDR|EBDR|WBDR|RAMP|RA\d|FRONTAGE|FR\b)/.test(text);
+}
+
+function shouldUseTxDOTTrafficCountForRoadClass(item, roadClass) {
+  const roadClassText = String(roadClass || "").toLowerCase();
+  if (roadClassText.includes("_link")) return true;
+  return !isTxDOTTrafficStationAuxiliary(item?.stationId);
+}
+
+function getApproxTrafficDistanceMeters(a, b) {
+  if (!a || !b) return Infinity;
+  if (typeof a.distanceTo === "function") return a.distanceTo(b);
+  const lat1 = Number(a.lat);
+  const lon1 = Number(a.lng ?? a.lon);
+  const lat2 = Number(b.lat);
+  const lon2 = Number(b.lng ?? b.lon);
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Infinity;
+  const toRad = value => value * Math.PI / 180;
+  const earthMeters = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const s1 = Math.sin(dLat / 2);
+  const s2 = Math.sin(dLon / 2);
+  const h = (s1 * s1) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * (s2 * s2);
+  return 2 * earthMeters * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function getHistoricTrafficEntryCenter(entry) {
+  if (entry?.centerLatLng) return entry.centerLatLng;
+  const layer = entry?.layer;
+  if (layer && typeof layer.getBounds === "function") {
+    try {
+      const bounds = layer.getBounds();
+      if (bounds && typeof bounds.isValid === "function" && bounds.isValid()) return bounds.getCenter();
+    } catch (_) {
+      // Fall through to no measured calibration.
+    }
+  }
+  return null;
+}
+
+function getHistoricTrafficAADTFactor(aadtValue) {
+  const aadt = Number(aadtValue);
+  if (!Number.isFinite(aadt) || aadt <= 0) return 1;
+  if (aadt < 10000) return 0.68;
+  if (aadt < 25000) return 0.78;
+  if (aadt < 75000) return 0.88;
+  if (aadt < 150000) return 1.04;
+  return 1.18;
+}
+
+function getHistoricTrafficMeasuredVolumeForEntry(entry, roadClass) {
+  if (!historicTrafficTxDOTCountsByRoute.size) return null;
+  const row = entry?.row || {};
+  const routeCodes = getHistoricTrafficRouteCodesForRow(row);
+  if (!routeCodes.length) return null;
+  const center = getHistoricTrafficEntryCenter(entry);
+  if (!center) return null;
+  const majorRoad = /^(motorway|trunk|primary|1|2)/i.test(String(roadClass || ""));
+  const maxDistanceMeters = majorRoad ? 12000 : 5000;
+  let best = null;
+
+  routeCodes.forEach(code => {
+    const candidates = historicTrafficTxDOTCountsByRoute.get(code) || [];
+    candidates.forEach(item => {
+      if (!shouldUseTxDOTTrafficCountForRoadClass(item, roadClass)) return;
+      const distanceMeters = getApproxTrafficDistanceMeters(center, item.latLng);
+      if (!Number.isFinite(distanceMeters) || distanceMeters > maxDistanceMeters) return;
+      if (!best || distanceMeters < best.distanceMeters) {
+        best = { ...item, routeCode: code, distanceMeters };
+      }
+    });
+  });
+  return best;
+}
+
+function indexHistoricTrafficTxDOTCountFeatures(features, boundsKey = "") {
+  historicTrafficTxDOTCountsByRoute.clear();
+  let count = 0;
+  let maxReportYear = null;
+  (Array.isArray(features) ? features : []).forEach(feature => {
+    const props = feature?.properties && typeof feature.properties === "object" ? feature.properties : {};
+    const routeCode = normalizeTxDOTTrafficRouteCode(props.ON_ROAD);
+    if (!routeCode) return;
+    const latLng = getTxDOTTrafficCountFeatureLatLng(feature);
+    if (!latLng) return;
+    const aadt = getTxDOTTrafficCountValue(props);
+    if (!Number.isFinite(aadt)) return;
+    const year = Number(props.AADT_RPT_YEAR);
+    const item = {
+      routeCode,
+      latLng,
+      aadt,
+      year: Number.isFinite(year) ? year : null,
+      stationId: String(props.TRFC_STATN_ID || "").trim(),
+      road: String(props.ON_ROAD || "").trim(),
+      county: String(props.CNTY_NM || "").trim(),
+      district: String(props.DIST_NM || "").trim()
+    };
+    if (!historicTrafficTxDOTCountsByRoute.has(routeCode)) {
+      historicTrafficTxDOTCountsByRoute.set(routeCode, []);
+    }
+    historicTrafficTxDOTCountsByRoute.get(routeCode).push(item);
+    count += 1;
+    if (Number.isFinite(year)) {
+      maxReportYear = Number.isFinite(maxReportYear) ? Math.max(maxReportYear, year) : year;
+    }
+  });
+
+  historicTrafficTxDOTCountState.featureCount = count;
+  historicTrafficTxDOTCountState.maxReportYear = maxReportYear;
+  historicTrafficTxDOTCountState.lastBoundsKey = boundsKey || historicTrafficTxDOTCountState.lastBoundsKey;
+  historicTrafficTxDOTCountState.lastError = "";
+  return count;
+}
+
+async function ensureHistoricTrafficTxDOTCountsForBounds(bounds) {
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) return false;
+  const expandedBounds = bounds.pad(TXDOT_TRAFFIC_COUNTS_BOUNDS_PAD);
+  const boundsKey = getTxDOTTrafficCountsBoundsKey(expandedBounds);
+  if (boundsKey && boundsKey === historicTrafficTxDOTCountState.lastBoundsKey && historicTrafficTxDOTCountState.featureCount > 0) {
+    return true;
+  }
+  if (historicTrafficTxDOTCountState.loadPromise) return historicTrafficTxDOTCountState.loadPromise;
+
+  historicTrafficTxDOTCountState.loadPromise = (async () => {
+    try {
+      const collection = await fetchTxDOTTrafficCountsGeoJsonForBounds(expandedBounds);
+      indexHistoricTrafficTxDOTCountFeatures(collection?.features || [], boundsKey);
+      return true;
+    } catch (error) {
+      historicTrafficTxDOTCountState.lastError = error?.message || "Request failed.";
+      return false;
+    } finally {
+      historicTrafficTxDOTCountState.loadPromise = null;
+    }
+  })();
+
+  return historicTrafficTxDOTCountState.loadPromise;
+}
+
+function ensureHistoricTrafficTxDOTCountsForCurrentView() {
+  const bounds = map.getBounds?.();
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) return Promise.resolve(false);
+  return ensureHistoricTrafficTxDOTCountsForBounds(bounds);
+}
 const cityLimitsState = {
   loaded: false,
   loading: false,
@@ -1577,6 +2589,588 @@ const cityLimitsState = {
   zoomListenerBound: false,
   sourceName: "USA Census Populated Places"
 };
+
+function escapeTxDOTTrafficHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[ch]);
+}
+
+function getTxDOTTrafficCountsBoundsKey(bounds) {
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) return "";
+  const southWest = bounds.getSouthWest();
+  const northEast = bounds.getNorthEast();
+  return [
+    Number(southWest?.lat || 0).toFixed(3),
+    Number(southWest?.lng || 0).toFixed(3),
+    Number(northEast?.lat || 0).toFixed(3),
+    Number(northEast?.lng || 0).toFixed(3)
+  ].join("|");
+}
+
+function getTxDOTTrafficCountsZoomHintText() {
+  const zoom = Number(map.getZoom?.()) || 0;
+  return `Zoom in to level ${TXDOT_TRAFFIC_COUNTS_MIN_ZOOM}+ to load TxDOT measured counts (current: ${zoom.toFixed(1)}).`;
+}
+
+function getTxDOTTrafficCountValue(properties) {
+  const value = Number(properties?.AADT_RPT_QTY);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function getTxDOTTrafficCountBucket(value) {
+  const numeric = Number(value);
+  let match = TXDOT_TRAFFIC_COUNT_BUCKETS[0];
+  TXDOT_TRAFFIC_COUNT_BUCKETS.forEach(bucket => {
+    if (Number.isFinite(numeric) && numeric >= bucket.min) match = bucket;
+  });
+  return match;
+}
+
+function formatTxDOTTrafficCountValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toLocaleString() : "Unknown";
+}
+
+function getTxDOTTrafficCountFeatureLatLng(feature) {
+  const coordinates = Array.isArray(feature?.geometry?.coordinates)
+    ? feature.geometry.coordinates
+    : [];
+  let lon = Number(coordinates[0]);
+  let lat = Number(coordinates[1]);
+  const props = feature?.properties && typeof feature.properties === "object" ? feature.properties : {};
+  if (!Number.isFinite(lat)) lat = Number(props.LATITUDE);
+  if (!Number.isFinite(lon)) lon = Number(props.LONGITUDE);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return L.latLng(lat, lon);
+}
+
+function buildTxDOTTrafficCountMarkerStyle(feature) {
+  const props = feature?.properties && typeof feature.properties === "object" ? feature.properties : {};
+  const countValue = getTxDOTTrafficCountValue(props);
+  const bucket = getTxDOTTrafficCountBucket(countValue);
+  return {
+    renderer: txdotTrafficCountsRenderer,
+    pane: TXDOT_TRAFFIC_COUNTS_PANE,
+    radius: bucket.radius,
+    color: "#f8fafc",
+    weight: 1.3,
+    opacity: 0.95,
+    fillColor: bucket.color,
+    fillOpacity: 0.82
+  };
+}
+
+function buildTxDOTTrafficCountPopupContent(properties, lat, lon) {
+  const props = properties && typeof properties === "object" ? properties : {};
+  const countValue = getTxDOTTrafficCountValue(props);
+  const bucket = getTxDOTTrafficCountBucket(countValue);
+  const stationId = String(props.TRFC_STATN_ID || "").trim() || "Unknown";
+  const road = String(props.ON_ROAD || "").trim() || "Unknown road";
+  const year = Number(props.AADT_RPT_YEAR);
+  const yearText = Number.isFinite(year) ? String(year) : "Unknown";
+  const activeText = Number(props.ACTIVE) === 1 ? "Active" : "Inactive/unknown";
+  const detailRows = [
+    ["Station", stationId],
+    ["Road", road],
+    ["AADT", `${formatTxDOTTrafficCountValue(countValue)} vehicles/day`],
+    ["Report Year", yearText],
+    ["Volume Class", bucket.label],
+    ["District", props.DIST_NM || ""],
+    ["County", props.CNTY_NM || ""],
+    ["Category", props.CATEGORY || ""],
+    ["Status", activeText],
+    ["Count Cycle", props.COUNT_CYCLE || ""],
+    ["Latitude", Number.isFinite(lat) ? lat.toFixed(6) : ""],
+    ["Longitude", Number.isFinite(lon) ? lon.toFixed(6) : ""]
+  ].filter(([, value]) => String(value ?? "").trim());
+
+  return `
+    <div class="txdot-traffic-popup">
+      <strong>TxDOT Measured AADT Count</strong>
+      <table>
+        <tbody>
+          ${detailRows.map(([label, value]) => `
+            <tr>
+              <th>${escapeTxDOTTrafficHtml(label)}</th>
+              <td>${escapeTxDOTTrafficHtml(value)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+      <p style="margin:8px 0 0;color:#536a80;font-size:11px;">
+        Source: <a href="${TXDOT_TRAFFIC_COUNTS_SOURCE_PAGE_URL}" target="_blank" rel="noopener">TxDOT Traffic Count Maps</a>
+      </p>
+    </div>
+  `;
+}
+
+function txdotTrafficCountFeatureToMarker(feature) {
+  if (!feature || feature.type !== "Feature") return null;
+  const latLng = getTxDOTTrafficCountFeatureLatLng(feature);
+  if (!latLng) return null;
+  const marker = L.circleMarker(latLng, buildTxDOTTrafficCountMarkerStyle(feature));
+  const props = feature.properties && typeof feature.properties === "object" ? feature.properties : {};
+  marker.bindPopup(buildTxDOTTrafficCountPopupContent(props, latLng.lat, latLng.lng), { maxWidth: 340 });
+  const stationId = String(props.TRFC_STATN_ID || "").trim();
+  const countValue = getTxDOTTrafficCountValue(props);
+  marker.bindTooltip(
+    `${stationId ? `${stationId}: ` : ""}${formatTxDOTTrafficCountValue(countValue)} AADT`,
+    { direction: "top", sticky: true, opacity: 0.9 }
+  );
+  return marker;
+}
+
+function updateTxDOTTrafficCountsLayerStatus(message = "") {
+  const statusNode = document.getElementById("txdotTrafficCountsLayerStatus");
+  if (!statusNode) return;
+
+  if (message) {
+    statusNode.textContent = String(message);
+    return;
+  }
+
+  const requested = !!document.getElementById("txdotTrafficCountsLayerEnabled")?.checked;
+  const visible = map.hasLayer(txdotTrafficCountsLayerGroup);
+  const count = Number(txdotTrafficCountsState.featureCount) || 0;
+  const zoom = Number(map.getZoom?.()) || 0;
+
+  if (requested && zoom < TXDOT_TRAFFIC_COUNTS_MIN_ZOOM) {
+    statusNode.textContent = getTxDOTTrafficCountsZoomHintText();
+    return;
+  }
+  if (txdotTrafficCountsState.loading) {
+    statusNode.textContent = "Loading free TxDOT measured AADT stations...";
+    return;
+  }
+  if (txdotTrafficCountsState.lastError) {
+    statusNode.textContent = `Unable to load TxDOT measured counts: ${txdotTrafficCountsState.lastError}`;
+    return;
+  }
+
+  const yearNote = Number.isFinite(txdotTrafficCountsState.maxReportYear)
+    ? `, latest year ${txdotTrafficCountsState.maxReportYear}`
+    : "";
+  const limitNote = txdotTrafficCountsState.exceededTransferLimit
+    ? " Zoom in for more stations; the public service limit was reached."
+    : "";
+  if (visible) {
+    statusNode.textContent = count > 0
+      ? `Layer is on (${count.toLocaleString()} TxDOT AADT stations${yearNote}).${limitNote}`
+      : "Layer is on (no TxDOT AADT stations in this map view).";
+    return;
+  }
+  if (txdotTrafficCountsState.loaded) {
+    statusNode.textContent = count > 0
+      ? `Layer is off (${count.toLocaleString()} TxDOT AADT stations ready${yearNote}).`
+      : "Layer is off (no TxDOT AADT stations loaded for this map view).";
+    return;
+  }
+  statusNode.textContent = "Layer is off.";
+}
+
+async function fetchTxDOTTrafficCountsGeoJsonForBounds(bounds) {
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) {
+    return { type: "FeatureCollection", features: [], properties: { exceededTransferLimit: false } };
+  }
+
+  const southWest = bounds.getSouthWest();
+  const northEast = bounds.getNorthEast();
+  const geometry = [
+    Number(southWest.lng),
+    Number(southWest.lat),
+    Number(northEast.lng),
+    Number(northEast.lat)
+  ].join(",");
+  const allFeatures = [];
+  let exceededTransferLimit = false;
+
+  for (let offset = 0; offset < TXDOT_TRAFFIC_COUNTS_MAX_FEATURES; offset += TXDOT_TRAFFIC_COUNTS_FETCH_RECORD_LIMIT) {
+    const params = new URLSearchParams({
+      where: "ACTIVE = 1 AND AADT_RPT_QTY IS NOT NULL",
+      outFields: TXDOT_TRAFFIC_COUNTS_FIELDS,
+      returnGeometry: "true",
+      outSR: "4326",
+      inSR: "4326",
+      geometryType: "esriGeometryEnvelope",
+      spatialRel: "esriSpatialRelIntersects",
+      geometry,
+      orderByFields: "TRFC_STATN_ID ASC",
+      resultRecordCount: String(TXDOT_TRAFFIC_COUNTS_FETCH_RECORD_LIMIT),
+      resultOffset: String(offset),
+      f: "geojson"
+    });
+
+    const response = await fetch(`${TXDOT_TRAFFIC_COUNTS_QUERY_URL}?${params.toString()}`, {
+      cache: "no-store",
+      headers: { Accept: "application/geo+json, application/json" }
+    });
+    if (!response.ok) {
+      let extra = "";
+      try {
+        const text = await response.text();
+        const parsed = text ? JSON.parse(text) : null;
+        const serviceError = getTexasLandfillsArcGisErrorMessage(parsed);
+        if (serviceError) extra = `: ${serviceError}`;
+      } catch (_) {
+        // Ignore non-JSON response bodies.
+      }
+      throw new Error(`TxDOT count query failed (${response.status})${extra}`);
+    }
+
+    const payload = await response.json();
+    const serviceError = getTexasLandfillsArcGisErrorMessage(payload);
+    if (serviceError) throw new Error(serviceError);
+    const features = Array.isArray(payload?.features) ? payload.features : [];
+    allFeatures.push(...features);
+    exceededTransferLimit = !!(payload?.properties?.exceededTransferLimit || payload?.exceededTransferLimit);
+    if (!exceededTransferLimit || !features.length || allFeatures.length >= TXDOT_TRAFFIC_COUNTS_MAX_FEATURES) break;
+  }
+
+  return {
+    type: "FeatureCollection",
+    features: allFeatures.slice(0, TXDOT_TRAFFIC_COUNTS_MAX_FEATURES),
+    properties: {
+      exceededTransferLimit: exceededTransferLimit && allFeatures.length >= TXDOT_TRAFFIC_COUNTS_MAX_FEATURES
+    }
+  };
+}
+
+function loadTxDOTTrafficCountsIntoLayerGroup(collection) {
+  txdotTrafficCountsLayerGroup.clearLayers();
+  const features = Array.isArray(collection?.features) ? collection.features : [];
+  let added = 0;
+  let maxReportYear = null;
+
+  features.forEach(feature => {
+    const marker = txdotTrafficCountFeatureToMarker(feature);
+    if (!marker) return;
+    txdotTrafficCountsLayerGroup.addLayer(marker);
+    added += 1;
+    const year = Number(feature?.properties?.AADT_RPT_YEAR);
+    if (Number.isFinite(year)) {
+      maxReportYear = Number.isFinite(maxReportYear) ? Math.max(maxReportYear, year) : year;
+    }
+  });
+
+  txdotTrafficCountsState.maxReportYear = maxReportYear;
+  txdotTrafficCountsState.exceededTransferLimit = !!collection?.properties?.exceededTransferLimit;
+  indexHistoricTrafficTxDOTCountFeatures(features, txdotTrafficCountsState.lastBoundsKey);
+  return added;
+}
+
+function scheduleTxDOTTrafficCountsLayerRefresh(options = {}) {
+  if (!document.getElementById("txdotTrafficCountsLayerEnabled")?.checked) return;
+  if (txdotTrafficCountsState.refreshTimer) clearTimeout(txdotTrafficCountsState.refreshTimer);
+  const force = !!options.force;
+  txdotTrafficCountsState.refreshTimer = setTimeout(() => {
+    txdotTrafficCountsState.refreshTimer = null;
+    refreshTxDOTTrafficCountsLayerForCurrentView({ force }).catch(error => {
+      console.warn("Unable to refresh TxDOT measured traffic counts:", error);
+      updateTxDOTTrafficCountsLayerStatus("Unable to refresh TxDOT measured counts.");
+    });
+  }, TXDOT_TRAFFIC_COUNTS_MOVE_REFRESH_DEBOUNCE_MS);
+}
+
+function handleTxDOTTrafficCountsMapMoveEnd() {
+  scheduleTxDOTTrafficCountsLayerRefresh();
+}
+
+function handleTxDOTTrafficCountsMapZoomEnd() {
+  scheduleTxDOTTrafficCountsLayerRefresh({ force: true });
+}
+
+function setTxDOTTrafficCountsMoveListenerBound(enabled) {
+  const shouldBind = !!enabled;
+  if (shouldBind && !txdotTrafficCountsState.moveListenerBound) {
+    map.on("moveend", handleTxDOTTrafficCountsMapMoveEnd);
+    txdotTrafficCountsState.moveListenerBound = true;
+  }
+  if (shouldBind && !txdotTrafficCountsState.zoomListenerBound) {
+    map.on("zoomend", handleTxDOTTrafficCountsMapZoomEnd);
+    txdotTrafficCountsState.zoomListenerBound = true;
+  }
+  if (!shouldBind && txdotTrafficCountsState.moveListenerBound) {
+    map.off("moveend", handleTxDOTTrafficCountsMapMoveEnd);
+    txdotTrafficCountsState.moveListenerBound = false;
+  }
+  if (!shouldBind && txdotTrafficCountsState.zoomListenerBound) {
+    map.off("zoomend", handleTxDOTTrafficCountsMapZoomEnd);
+    txdotTrafficCountsState.zoomListenerBound = false;
+  }
+}
+
+async function refreshTxDOTTrafficCountsLayerForCurrentView(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const force = !!opts.force;
+  const requested = !!document.getElementById("txdotTrafficCountsLayerEnabled")?.checked;
+
+  if (!requested) {
+    map.removeLayer(txdotTrafficCountsLayerGroup);
+    updateTxDOTTrafficCountsLayerStatus();
+    return false;
+  }
+
+  const bounds = map.getBounds?.();
+  if (!bounds || typeof bounds.isValid !== "function" || !bounds.isValid()) {
+    updateTxDOTTrafficCountsLayerStatus("Layer is on (waiting for map view).");
+    return false;
+  }
+
+  const zoom = Number(map.getZoom?.()) || 0;
+  if (zoom < TXDOT_TRAFFIC_COUNTS_MIN_ZOOM) {
+    txdotTrafficCountsLayerGroup.clearLayers();
+    txdotTrafficCountsState.loaded = false;
+    txdotTrafficCountsState.featureCount = 0;
+    txdotTrafficCountsState.lastBoundsKey = "";
+    txdotTrafficCountsState.exceededTransferLimit = false;
+    txdotTrafficCountsState.maxReportYear = null;
+    updateTxDOTTrafficCountsLayerStatus(getTxDOTTrafficCountsZoomHintText());
+    return true;
+  }
+
+  const expandedBounds = bounds.pad(TXDOT_TRAFFIC_COUNTS_BOUNDS_PAD);
+  const boundsKey = getTxDOTTrafficCountsBoundsKey(expandedBounds);
+  if (!force && txdotTrafficCountsState.loaded && boundsKey && boundsKey === txdotTrafficCountsState.lastBoundsKey) {
+    if (!map.hasLayer(txdotTrafficCountsLayerGroup)) txdotTrafficCountsLayerGroup.addTo(map);
+    updateTxDOTTrafficCountsLayerStatus();
+    return true;
+  }
+
+  if (txdotTrafficCountsState.loadPromise) {
+    const pendingResult = await txdotTrafficCountsState.loadPromise;
+    const latestBounds = map.getBounds?.();
+    const latestKey = latestBounds ? getTxDOTTrafficCountsBoundsKey(latestBounds.pad(TXDOT_TRAFFIC_COUNTS_BOUNDS_PAD)) : "";
+    if (latestKey && latestKey !== txdotTrafficCountsState.lastBoundsKey) {
+      scheduleTxDOTTrafficCountsLayerRefresh();
+    }
+    return pendingResult;
+  }
+
+  txdotTrafficCountsState.loading = true;
+  txdotTrafficCountsState.lastError = "";
+  updateTxDOTTrafficCountsLayerStatus("Loading free TxDOT measured AADT stations...");
+
+  txdotTrafficCountsState.loadPromise = (async () => {
+    try {
+      const collection = await fetchTxDOTTrafficCountsGeoJsonForBounds(expandedBounds);
+      const count = loadTxDOTTrafficCountsIntoLayerGroup(collection);
+      txdotTrafficCountsState.featureCount = count;
+      txdotTrafficCountsState.loaded = true;
+      txdotTrafficCountsState.lastBoundsKey = boundsKey;
+      historicTrafficTxDOTCountState.lastBoundsKey = boundsKey;
+      return true;
+    } catch (error) {
+      txdotTrafficCountsLayerGroup.clearLayers();
+      txdotTrafficCountsState.loaded = false;
+      txdotTrafficCountsState.featureCount = 0;
+      txdotTrafficCountsState.lastBoundsKey = "";
+      txdotTrafficCountsState.exceededTransferLimit = false;
+      txdotTrafficCountsState.maxReportYear = null;
+      txdotTrafficCountsState.lastError = error?.message || "Request failed.";
+      return false;
+    } finally {
+      txdotTrafficCountsState.loading = false;
+      txdotTrafficCountsState.loadPromise = null;
+    }
+  })();
+
+  const ok = await txdotTrafficCountsState.loadPromise;
+  const stillRequested = !!document.getElementById("txdotTrafficCountsLayerEnabled")?.checked;
+  if (!stillRequested) {
+    map.removeLayer(txdotTrafficCountsLayerGroup);
+    updateTxDOTTrafficCountsLayerStatus();
+    return false;
+  }
+
+  if (ok) {
+    if (!map.hasLayer(txdotTrafficCountsLayerGroup)) {
+      txdotTrafficCountsLayerGroup.addTo(map);
+    }
+  } else {
+    map.removeLayer(txdotTrafficCountsLayerGroup);
+  }
+  updateTxDOTTrafficCountsLayerStatus();
+  if (isHistoricTrafficLayerEnabled()) refreshHistoricTrafficLayer();
+  return ok;
+}
+
+async function setTxDOTTrafficCountsLayerEnabled(enabled, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const persist = opts.persist !== false;
+  const shouldShow = !!enabled;
+  const toggleNode = document.getElementById("txdotTrafficCountsLayerEnabled");
+
+  if (toggleNode && toggleNode.checked !== shouldShow) {
+    toggleNode.checked = shouldShow;
+  }
+  if (persist) {
+    storageSet(TXDOT_TRAFFIC_COUNTS_LAYER_VISIBLE_KEY, shouldShow ? "on" : "off");
+  }
+
+  if (!shouldShow) {
+    if (txdotTrafficCountsState.refreshTimer) {
+      clearTimeout(txdotTrafficCountsState.refreshTimer);
+      txdotTrafficCountsState.refreshTimer = null;
+    }
+    setTxDOTTrafficCountsMoveListenerBound(false);
+    map.removeLayer(txdotTrafficCountsLayerGroup);
+    updateTxDOTTrafficCountsLayerStatus();
+    return;
+  }
+
+  setTxDOTTrafficCountsMoveListenerBound(true);
+  const loaded = await refreshTxDOTTrafficCountsLayerForCurrentView({ force: opts.force !== false });
+  if (!loaded && txdotTrafficCountsState.lastError) {
+    if (toggleNode) toggleNode.checked = false;
+    storageSet(TXDOT_TRAFFIC_COUNTS_LAYER_VISIBLE_KEY, "off");
+    setTxDOTTrafficCountsMoveListenerBound(false);
+    map.removeLayer(txdotTrafficCountsLayerGroup);
+  }
+  updateTxDOTTrafficCountsLayerStatus();
+}
+
+function openTxDOTTrafficCountsInfoWindow() {
+  const count = Number(txdotTrafficCountsState.featureCount) || 0;
+  const yearText = Number.isFinite(txdotTrafficCountsState.maxReportYear)
+    ? String(txdotTrafficCountsState.maxReportYear)
+    : "Not loaded";
+  const win = window.open("", "txdotTrafficCountsInfo", "width=780,height=720,scrollbars=yes,resizable=yes");
+  if (!win) {
+    alert("Pop-up blocked. Allow pop-ups for this site to view TxDOT traffic count information.");
+    return;
+  }
+
+  win.document.open();
+  win.document.write(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>TxDOT Measured Traffic Counts</title>
+        <style>
+          body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: #f5f7fb; color: #172033; line-height: 1.45; }
+          header { padding: 22px 26px; background: #142032; color: #f7fbff; }
+          h1 { margin: 0 0 6px; font-size: 22px; }
+          header p { margin: 0; color: #c9d7e8; }
+          main { padding: 22px 26px 30px; }
+          section { margin-bottom: 18px; padding: 16px; border: 1px solid #d7e0ea; border-radius: 8px; background: #ffffff; }
+          h2 { margin: 0 0 10px; font-size: 16px; color: #0f2740; }
+          ul { margin: 8px 0 0 20px; padding: 0; }
+          li { margin: 6px 0; }
+          a { color: #0d5f9f; font-weight: 700; }
+          .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+          .metric { padding: 10px 12px; border-radius: 8px; background: #eef5fb; border: 1px solid #d5e4f0; }
+          .metric span { display: block; color: #52687f; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+          .metric strong { display: block; margin-top: 3px; font-size: 15px; }
+          .note { border-color: #7fb0e8; background: #ecf5ff; }
+          .warn { border-color: #ebc76d; background: #fff8e2; }
+        </style>
+      </head>
+      <body>
+        <header>
+          <h1>TxDOT Measured Traffic Counts</h1>
+          <p>Free public AADT station data for Texas route planning context.</p>
+        </header>
+        <main>
+          <section class="summary">
+            <div class="metric"><span>Loaded Stations</span><strong>${count.toLocaleString()}</strong></div>
+            <div class="metric"><span>Latest Loaded Year</span><strong>${escapeTxDOTTrafficHtml(yearText)}</strong></div>
+            <div class="metric"><span>Measure</span><strong>AADT volume</strong></div>
+            <div class="metric"><span>Cost</span><strong>Free/public</strong></div>
+          </section>
+          <section class="note">
+            <h2>What This Layer Shows</h2>
+            <ul>
+              <li>Measured TxDOT Annual Average Daily Traffic (AADT) station points for the current map view.</li>
+              <li>AADT is a traffic volume measure: average vehicles per day at or near the count station.</li>
+              <li>Markers are color-bucketed by reported daily volume, not by speed, delay, or congestion.</li>
+              <li>This is useful for identifying roads with higher measured traffic demand when a paid speed provider is not available.</li>
+            </ul>
+          </section>
+          <section class="warn">
+            <h2>Important Difference From Historic Congestion</h2>
+            <ul>
+              <li>TxDOT AADT counts do not tell TDS-PAK what traffic speed was at 7:30 AM or 5:00 PM.</li>
+              <li>The estimated historic traffic layer still uses TDS-PAK's day/time heuristic unless a measured speed provider is added later.</li>
+              <li>Use this measured layer as a free volume reference beside the estimated congestion layer.</li>
+            </ul>
+          </section>
+          <section>
+            <h2>Exact Data Sources And Links</h2>
+            <ul>
+              <li><strong>TxDOT Traffic Count Maps:</strong> <a href="${TXDOT_TRAFFIC_COUNTS_SOURCE_PAGE_URL}" target="_blank" rel="noopener">official TxDOT traffic-count data page</a>.</li>
+              <li><strong>ArcGIS Feature Service:</strong> <a href="${TXDOT_TRAFFIC_COUNTS_FEATURE_LAYER_URL}" target="_blank" rel="noopener">TxDOT AADT Annuals Public View query layer</a>.</li>
+              <li><strong>ArcGIS Item Page:</strong> <a href="${TXDOT_TRAFFIC_COUNTS_ITEM_URL}" target="_blank" rel="noopener">TxDOT Annual Average Daily Traffic Counts (Public)</a>.</li>
+              <li><strong>STARS II:</strong> <a href="${TXDOT_TRAFFIC_COUNTS_STARS_URL}" target="_blank" rel="noopener">TxDOT public STARS II information</a> for detailed daily, hourly, directional, vehicle-class, and historical statistics.</li>
+            </ul>
+          </section>
+          <section>
+            <h2>Analyst Notes</h2>
+            <ul>
+              <li>Large zoomed-out map views may hit the public service limit; zoom in and reload for denser coverage.</li>
+              <li>Mainlane and frontage-road counts may be separate in TxDOT systems.</li>
+              <li>Coverage depends on TxDOT station locations and reporting cycles, so not every local road has a measured count point.</li>
+            </ul>
+          </section>
+        </main>
+      </body>
+    </html>
+  `);
+  win.document.close();
+  try { win.focus(); } catch (_) {}
+}
+
+function initTxDOTTrafficCountsLayerControls() {
+  const toggleHeader = document.getElementById("txdotTrafficCountsLayerToggleHeader");
+  const content = document.getElementById("txdotTrafficCountsLayerContent");
+  const masterToggle = document.getElementById("txdotTrafficCountsLayerEnabled");
+  const statusNode = document.getElementById("txdotTrafficCountsLayerStatus");
+  const refreshBtn = document.getElementById("txdotTrafficCountsRefreshBtn");
+  const infoBtn = document.getElementById("txdotTrafficCountsInfoBtn");
+  if (!toggleHeader || !content || !masterToggle || !statusNode) return;
+  if (toggleHeader.dataset.txdotTrafficCountsBound === "1") return;
+  toggleHeader.dataset.txdotTrafficCountsBound = "1";
+
+  content.classList.add("collapsed");
+  toggleHeader.classList.remove("open");
+
+  toggleHeader.addEventListener("click", () => {
+    const collapsed = content.classList.toggle("collapsed");
+    toggleHeader.classList.toggle("open", !collapsed);
+  });
+
+  masterToggle.addEventListener("change", () => {
+    setTxDOTTrafficCountsLayerEnabled(masterToggle.checked).catch(error => {
+      console.warn("Unable to toggle TxDOT traffic counts layer:", error);
+      updateTxDOTTrafficCountsLayerStatus("Unable to update TxDOT measured counts layer.");
+    });
+  });
+
+  refreshBtn?.addEventListener("click", () => {
+    setTxDOTTrafficCountsLayerEnabled(true, { force: true }).catch(error => {
+      console.warn("Unable to refresh TxDOT traffic counts layer:", error);
+      updateTxDOTTrafficCountsLayerStatus("Unable to refresh TxDOT measured counts.");
+    });
+  });
+  infoBtn?.addEventListener("click", openTxDOTTrafficCountsInfoWindow);
+
+  const stored = storageGet(TXDOT_TRAFFIC_COUNTS_LAYER_VISIBLE_KEY);
+  const shouldShow = stored === "on";
+  masterToggle.checked = shouldShow;
+  updateTxDOTTrafficCountsLayerStatus();
+
+  if (shouldShow) {
+    setTxDOTTrafficCountsLayerEnabled(true, { persist: false }).catch(error => {
+      console.warn("Unable to restore TxDOT measured counts layer visibility:", error);
+      updateTxDOTTrafficCountsLayerStatus("Unable to restore TxDOT measured counts layer.");
+    });
+  }
+}
 const localStreetBackendState = {
   baseUrl: LOCAL_STREET_BACKEND_URL_DEFAULT,
   available: false,
@@ -1925,6 +3519,10 @@ function resolveStreetSymbologyCasingStyleForEntry(entry, centerStyle) {
 }
 
 function getStreetSegmentBaseStyle(entry) {
+  if (isHistoricTrafficLayerEnabled()) {
+    return getHistoricTrafficStyleForEntry(entry);
+  }
+
   const state = ensureStreetSymbologyState();
   const center = {
     color: resolveStreetSymbologyColorForEntry(entry),
@@ -2082,6 +3680,11 @@ function updateStreetNetworkSidebarBackendPrompt() {
   const layerRequested = !!layerToggle?.checked;
 
   if (!layerRequested) {
+    promptNode.hidden = true;
+    return;
+  }
+
+  if (isHistoricTrafficPublicStreetModeActive()) {
     promptNode.hidden = true;
     return;
   }
@@ -4231,6 +5834,8 @@ function clearRenderedStreetSegmentState() {
   streetAttributeById.clear();
   streetAttributesRows = [];
   streetAttributeSelectedIds.clear();
+  updateHistoricTrafficLayerStatus();
+  syncHistoricTrafficLegendControl();
   if (attributeTableMode === "streets") renderAttributeTable();
   updateStreetSetupGuide();
 }
@@ -4580,7 +6185,7 @@ function syncStreetNetworkOverlay() {
   const sourceToggle = document.getElementById("useLocalStreetSource");
   const sourceEnabled = !!sourceToggle && !!sourceToggle.checked;
   const layerVisible = isStreetNetworkLayerVisibleEnabled();
-  const enabled = sourceEnabled && layerVisible;
+  const enabled = layerVisible && (sourceEnabled || shouldShowStreetLayerForHistoricTraffic());
   if (enabled) {
     if (!map.hasLayer(streetAttributeLayerGroup)) {
       streetAttributeLayerGroup.addTo(map);
@@ -4600,6 +6205,8 @@ function syncStreetNetworkOverlay() {
   }
 
   applyLayerManagerOrder();
+  updateHistoricTrafficLayerStatus();
+  syncHistoricTrafficLegendControl();
   refreshLayerManagerUiIfOpen();
 }
 
@@ -5839,6 +7446,12 @@ function upsertStreetElement(e) {
   const id = Number(e?.id);
   if (!Number.isFinite(id) || !Array.isArray(e.geom) || e.geom.length < 2) return false;
   const latlngs = e.geom.map(g => [g.lat, g.lon]);
+  let centerLatLng = null;
+  try {
+    centerLatLng = L.latLngBounds(latlngs).getCenter();
+  } catch (_) {
+    centerLatLng = null;
+  }
   const tags = normalizeLocalStreetTags(e.tags || {});
   const incomingRow = {
     id,
@@ -5854,6 +7467,7 @@ function upsertStreetElement(e) {
   const existing = streetAttributeById.get(id);
   if (existing?.layer) {
     existing.row = mergeStreetAttributeRows(existing.row, incomingRow);
+    existing.centerLatLng = centerLatLng;
     if (!isStreetCasingEnabledForRendering() && existing.casingLayer) {
       removeStreetEntryCasingLayer(existing);
     }
@@ -5863,7 +7477,7 @@ function upsertStreetElement(e) {
     return false;
   }
   const row = mergeStreetAttributeRows(null, incomingRow);
-  const baseStyle = getStreetSegmentBaseStyle({ row });
+  const baseStyle = getStreetSegmentBaseStyle({ row, centerLatLng });
   const useCasing = isStreetCasingEnabledForRendering();
   const casingLayer = useCasing
     ? L.polyline(latlngs, {
@@ -5885,11 +7499,11 @@ function upsertStreetElement(e) {
   bindStreetSegmentLayerClick(layer, id);
   if (casingLayer) streetAttributeLayerGroup.addLayer(casingLayer);
   streetAttributeLayerGroup.addLayer(layer);
-  streetAttributeById.set(id, { id, row, layer, casingLayer });
+  streetAttributeById.set(id, { id, row, layer, casingLayer, centerLatLng });
   return true;
 }
 
-async function loadStreetAttributesForCurrentView(boundsOverride = null, polygonLayer = null) {
+async function loadStreetAttributesForCurrentView(boundsOverride = null, polygonLayer = null, options = {}) {
   if (streetLoadInFlight) {
     pendingStreetReload = true;
     updateStreetLoadStatus("Street attributes are already loading...", false);
@@ -5903,7 +7517,7 @@ async function loadStreetAttributesForCurrentView(boundsOverride = null, polygon
   const spanLat = Math.abs(north - south);
   const spanLng = Math.abs(east - west);
   const isPolygonScopedLoad = !!polygonLayer;
-  const useLocalSource = shouldUseLocalStreetSource();
+  const useLocalSource = !options.forcePublicProvider && shouldUseLocalStreetSource();
   if (!useLocalSource && !isPolygonScopedLoad && (spanLat > 1.6 || spanLng > 1.6)) {
     updateStreetLoadStatus("Zoom in more before loading street segments.", true);
     return;
@@ -6752,6 +8366,8 @@ const LAYER_MANAGER_ORDER_STORAGE_KEY = "layerManagerOrderTop";
 const LAYER_MANAGER_SELECTABLE_STORAGE_KEY = "layerManagerSelectable";
 const LAYER_MANAGER_STREET_KEY = "street-network";
 const ROUTE_SEQUENCE_LAYER_VISIBLE_KEY = "routeSequenceLayerVisible";
+const ROUTE_SEQUENCE_FIELD_KEY = "routeSequenceField";
+const ROUTE_SEQUENCE_FIELD_OPTIONS = Object.freeze(["NEWSEQ", "SEQNO"]);
 let layerManagerOrderTop = [];
 let layerManagerSelectableState = {};
 const sequenceLayerByRouteDay = new Map();
@@ -6759,6 +8375,7 @@ const sequenceLayerState = {
   routeDayCount: 0,
   segmentCount: 0,
   arrowCount: 0,
+  sourceField: "NEWSEQ",
   lastRunAt: 0
 };
 // ===== DELIVERED STOPS LAYER =====
@@ -7012,6 +8629,7 @@ function applyLayerManagerPaneOrder(orderTop = ensureLayerManagerOrder()) {
   const routeZ = streetOnTop ? 370 : 380;
   const streetZ = streetOnTop ? 380 : 370;
   const sequenceZ = routeZ - 1;
+  const txdotCountsZ = routeZ - 2;
 
   const routePaneEl = map.getPane(ROUTE_DAY_PANE);
   if (routePaneEl) routePaneEl.style.zIndex = String(routeZ);
@@ -7021,6 +8639,9 @@ function applyLayerManagerPaneOrder(orderTop = ensureLayerManagerOrder()) {
 
   const sequencePaneEl = map.getPane(SEQUENCE_PANE);
   if (sequencePaneEl) sequencePaneEl.style.zIndex = String(sequenceZ);
+
+  const txdotCountsPaneEl = map.getPane(TXDOT_TRAFFIC_COUNTS_PANE);
+  if (txdotCountsPaneEl) txdotCountsPaneEl.style.zIndex = String(txdotCountsZ);
 }
 
 function applyLayerManagerOrder() {
@@ -7137,10 +8758,43 @@ function buildSequenceArrowIcon(angleDeg, colorValue) {
   const safeAngle = Number.isFinite(Number(angleDeg)) ? Number(angleDeg) : 0;
   return L.divIcon({
     className: "sequence-arrow-marker",
-    html: `<span class="sequence-arrow-head" style="--sequence-arrow-color:${color};transform:rotate(${safeAngle.toFixed(1)}deg);"></span>`,
-    iconSize: [14, 14],
-    iconAnchor: [7, 7]
+    html: `
+      <span class="sequence-arrow-badge" style="--sequence-arrow-color:${color};transform:rotate(${safeAngle.toFixed(1)}deg);">
+        <svg class="sequence-arrow-svg" viewBox="0 0 16 34" aria-hidden="true" focusable="false">
+          <path class="sequence-arrow-outline" d="M8 1.5 15 10.8 11.2 10.1 11.2 32.5 4.8 32.5 4.8 10.1 1 10.8 8 1.5Z"></path>
+          <path class="sequence-arrow-fill" d="M8 4.6 12.6 10.2 9.6 9.7 9.6 30.4 6.4 30.4 6.4 9.7 3.4 10.2 8 4.6Z"></path>
+        </svg>
+      </span>
+    `,
+    iconSize: [12, 26],
+    iconAnchor: [6, 13]
   });
+}
+
+function normalizeRouteSequenceField(value) {
+  const token = String(value || "").trim().toUpperCase();
+  return ROUTE_SEQUENCE_FIELD_OPTIONS.includes(token) ? token : "NEWSEQ";
+}
+
+function getRouteSequenceSelectedField() {
+  const selectValue = document.getElementById("sequenceLayerFieldSelect")?.value;
+  return normalizeRouteSequenceField(selectValue || storageGet(ROUTE_SEQUENCE_FIELD_KEY));
+}
+
+function formatRouteSequenceFieldLabel(fieldName) {
+  const field = normalizeRouteSequenceField(fieldName);
+  return field === "SEQNO" ? "SeqNo" : "Newseq";
+}
+
+function parseRouteSequenceLayerValue(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  const text = String(value).trim();
+  if (!text) return NaN;
+  const numeric = Number(text.replace(/,/g, ""));
+  if (Number.isFinite(numeric)) return numeric;
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : NaN;
 }
 
 function clearSequenceLayerData(options = {}) {
@@ -7151,6 +8805,7 @@ function clearSequenceLayerData(options = {}) {
   sequenceLayerState.routeDayCount = 0;
   sequenceLayerState.segmentCount = 0;
   sequenceLayerState.arrowCount = 0;
+  sequenceLayerState.sourceField = getRouteSequenceSelectedField();
   sequenceLayerState.lastRunAt = 0;
   if (!options || options.silent !== true) {
     updateSequenceLayerStatus();
@@ -7187,24 +8842,149 @@ function updateSequenceLayerStatus(message = "") {
   const routeCount = Number(sequenceLayerState.routeDayCount) || 0;
   const segmentCount = Number(sequenceLayerState.segmentCount) || 0;
   const arrowCount = Number(sequenceLayerState.arrowCount) || 0;
+  const sourceField = sequenceLayerState.sourceField === "plans"
+    ? "Auto Sequence results"
+    : formatRouteSequenceFieldLabel(sequenceLayerState.sourceField || getRouteSequenceSelectedField());
 
   if (!routeCount || !segmentCount) {
     statusNode.textContent = enabled
-      ? "Run Sequence to generate route arrows."
+      ? `No arrows built yet. Choose ${formatRouteSequenceFieldLabel(getRouteSequenceSelectedField())} or load a file with sequence values.`
       : "Layer is off.";
     return;
   }
 
   if (!enabled) {
-    statusNode.textContent = `Layer is off. ${routeCount.toLocaleString()} route/day sequence(s) are ready.`;
+    statusNode.textContent = `Layer is off. ${routeCount.toLocaleString()} route/day sequence(s) from ${sourceField} are ready.`;
     return;
   }
 
-  statusNode.textContent = `Showing ${routeCount.toLocaleString()} route/day sequence(s), ${segmentCount.toLocaleString()} segment(s), ${arrowCount.toLocaleString()} arrow(s).`;
+  statusNode.textContent = `Showing ${routeCount.toLocaleString()} route/day sequence(s) from ${sourceField}, ${segmentCount.toLocaleString()} segment(s), ${arrowCount.toLocaleString()} arrow(s).`;
+}
+
+function rebuildSequenceLayerFromUploadedRows(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const sourceField = normalizeRouteSequenceField(opts.sourceField || getRouteSequenceSelectedField());
+  clearSequenceLayerData({ silent: true });
+  sequenceLayerState.sourceField = sourceField;
+
+  const routeDayEntries = Object.entries(routeDayGroups);
+  if (!routeDayEntries.length) {
+    updateSequenceLayerStatus("Upload a route file before turning on the sequence layer.");
+    return false;
+  }
+
+  const maxArrowCount = 7000;
+  let segmentCount = 0;
+  let arrowCount = 0;
+  let sequencedStopCount = 0;
+  let duplicateSequenceCount = 0;
+  const fieldLabel = formatRouteSequenceFieldLabel(sourceField);
+
+  routeDayEntries.forEach(([routeDayKey, group]) => {
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    const stops = layers
+      .map((layer, fallbackIndex) => {
+        const row = layer?._rowRef || {};
+        const sequence = parseRouteSequenceLayerValue(row?.[sourceField]);
+        const latLng = getLayerLatLng(layer);
+        if (!Number.isFinite(sequence) || !latLng) return null;
+        return {
+          layer,
+          sequence,
+          rowId: Number.isFinite(Number(layer?._rowId)) ? Number(layer._rowId) : fallbackIndex,
+          latLng
+        };
+      })
+      .filter(Boolean);
+
+    const sequenceValueCounts = new Map();
+    stops.forEach(stop => {
+      const key = String(stop.sequence);
+      sequenceValueCounts.set(key, (sequenceValueCounts.get(key) || 0) + 1);
+    });
+    sequenceValueCounts.forEach(count => {
+      if (count > 1) duplicateSequenceCount += count - 1;
+    });
+
+    stops.sort((a, b) => {
+      if (a.sequence !== b.sequence) return a.sequence - b.sequence;
+      return a.rowId - b.rowId;
+    });
+
+    if (stops.length < 2) return;
+    sequencedStopCount += stops.length;
+
+    const lineColor = getSequenceLayerLineColor(routeDayKey);
+    const layerGroup = L.layerGroup();
+
+    for (let i = 0; i < stops.length - 1; i += 1) {
+      const fromStop = stops[i];
+      const toStop = stops[i + 1];
+      const fromLatLng = fromStop.latLng;
+      const toLatLng = toStop.latLng;
+      const samePoint = Math.abs(Number(fromLatLng.lat) - Number(toLatLng.lat)) < 1e-9 &&
+        Math.abs(Number(fromLatLng.lng) - Number(toLatLng.lng)) < 1e-9;
+      if (samePoint) continue;
+
+      const line = L.polyline([fromLatLng, toLatLng], {
+        pane: SEQUENCE_PANE,
+        color: lineColor,
+        weight: 2.5,
+        opacity: 0.93,
+        dashArray: "9 5",
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false
+      });
+      line._sequenceRouteDayKey = routeDayKey;
+      layerGroup.addLayer(line);
+      segmentCount += 1;
+
+      if (arrowCount >= maxArrowCount) continue;
+      const midLat = (Number(fromLatLng.lat) + Number(toLatLng.lat)) / 2;
+      const midLng = (Number(fromLatLng.lng) + Number(toLatLng.lng)) / 2;
+      const bearing = computeSequenceBearingDegrees(fromLatLng, toLatLng);
+      const arrowMarker = L.marker([midLat, midLng], {
+        pane: SEQUENCE_PANE,
+        icon: buildSequenceArrowIcon(bearing, lineColor),
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 1000
+      });
+      arrowMarker._sequenceRouteDayKey = routeDayKey;
+      layerGroup.addLayer(arrowMarker);
+      arrowCount += 1;
+    }
+
+    if (layerGroup.getLayers().length) {
+      sequenceLayerByRouteDay.set(routeDayKey, layerGroup);
+    }
+  });
+
+  sequenceLayerState.routeDayCount = sequenceLayerByRouteDay.size;
+  sequenceLayerState.segmentCount = segmentCount;
+  sequenceLayerState.arrowCount = arrowCount;
+  sequenceLayerState.sourceField = sourceField;
+  sequenceLayerState.lastRunAt = Date.now();
+
+  syncSequenceLayerVisibilityOnMap();
+  if (!segmentCount) {
+    updateSequenceLayerStatus(`No usable ${fieldLabel} sequence values found. Choose the other sequence field or check the uploaded file.`);
+    return false;
+  }
+
+  const duplicateNote = duplicateSequenceCount > 0
+    ? ` Duplicate values are ordered by file row.`
+    : "";
+  updateSequenceLayerStatus(
+    `Built ${segmentCount.toLocaleString()} arrow segment(s) from ${fieldLabel} across ${sequenceLayerState.routeDayCount.toLocaleString()} route/day layer(s).${duplicateNote}`
+  );
+  return sequencedStopCount > 0;
 }
 
 function rebuildSequenceLayerFromPlans(plans) {
   clearSequenceLayerData({ silent: true });
+  sequenceLayerState.sourceField = "plans";
 
   const entries = Array.isArray(plans) ? plans : [];
   if (!entries.length) {
@@ -7307,7 +9087,8 @@ function rebuildSequenceLayerFromPlans(plans) {
         pane: SEQUENCE_PANE,
         icon: buildSequenceArrowIcon(bearing, lineColor),
         interactive: false,
-        keyboard: false
+        keyboard: false,
+        zIndexOffset: 1000
       });
       arrowMarker._sequenceRouteDayKey = routeDayKey;
       layerGroup.addLayer(arrowMarker);
@@ -7338,6 +9119,10 @@ function setSequenceLayerEnabled(enabled, options = {}) {
   if (persist) {
     storageSet(ROUTE_SEQUENCE_LAYER_VISIBLE_KEY, nextEnabled ? "on" : "off");
   }
+  if (nextEnabled && (!sequenceLayerState.segmentCount || sequenceLayerState.sourceField !== getRouteSequenceSelectedField())) {
+    rebuildSequenceLayerFromUploadedRows({ sourceField: getRouteSequenceSelectedField() });
+    return;
+  }
   syncSequenceLayerVisibilityOnMap();
 }
 
@@ -7345,8 +9130,9 @@ function initSequenceLayerControls() {
   const toggleHeader = document.getElementById("sequenceLayerToggleHeader");
   const content = document.getElementById("sequenceLayerContent");
   const masterToggle = document.getElementById("sequenceLayerEnabled");
+  const fieldSelect = document.getElementById("sequenceLayerFieldSelect");
   const statusNode = document.getElementById("sequenceLayerStatus");
-  if (!toggleHeader || !content || !masterToggle || !statusNode) return;
+  if (!toggleHeader || !content || !masterToggle || !fieldSelect || !statusNode) return;
   if (toggleHeader.dataset.sequenceLayerBound === "1") return;
   toggleHeader.dataset.sequenceLayerBound = "1";
 
@@ -7363,9 +9149,17 @@ function initSequenceLayerControls() {
     setSequenceLayerEnabled(masterToggle.checked);
   });
 
-  const stored = storageGet(ROUTE_SEQUENCE_LAYER_VISIBLE_KEY);
-  const shouldShow = stored == null ? true : stored === "on";
+  fieldSelect.value = normalizeRouteSequenceField(storageGet(ROUTE_SEQUENCE_FIELD_KEY));
+  sequenceLayerState.sourceField = fieldSelect.value;
+  fieldSelect.addEventListener("change", () => {
+    fieldSelect.value = normalizeRouteSequenceField(fieldSelect.value);
+    storageSet(ROUTE_SEQUENCE_FIELD_KEY, fieldSelect.value);
+    rebuildSequenceLayerFromUploadedRows({ sourceField: fieldSelect.value });
+  });
+
+  const shouldShow = false;
   masterToggle.checked = shouldShow;
+  storageSet(ROUTE_SEQUENCE_LAYER_VISIBLE_KEY, "off");
   setSequenceLayerEnabled(shouldShow, { persist: false });
   updateSequenceLayerStatus();
 }
@@ -22094,6 +23888,7 @@ if (labelText) {
   buildRouteCheckboxes([...routeSet]);
   buildRouteDayLayerControls();
   rebuildMultiDayServiceProfilesFromMapLayers();
+  rebuildSequenceLayerFromUploadedRows({ sourceField: getRouteSequenceSelectedField() });
   applyFilters();
   renderAttributeTable();
   refreshAttributeStatus();
@@ -23806,6 +25601,8 @@ initMultiDayManagerControls();
 initServiceDayLabelLayerControls();
 initTexasLandfillsLayerControls();
 initCityLimitsLayerControls();
+initHistoricTrafficLayerControls();
+initTxDOTTrafficCountsLayerControls();
 initSequenceLayerControls();
 
 const importWizardBtn = document.getElementById("importWizardBtn");
