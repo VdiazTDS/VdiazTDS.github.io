@@ -9148,6 +9148,56 @@ body.sun-mode .multiday-manager-status {
   color: #c7e0a9;
 }
 
+.route-sequencer-optimo-card {
+  border-color: #7aa45f;
+  background: linear-gradient(135deg, rgba(25, 38, 18, 0.82), rgba(15, 25, 11, 0.72));
+}
+
+.route-sequencer-optimo-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.route-sequencer-optimo-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.route-sequencer-optimo-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.route-sequencer-optimo-status {
+  border: 1px solid #5d7b42;
+  border-radius: 9px;
+  padding: 7px 9px;
+  background: rgba(12, 20, 8, 0.56);
+  color: #d9edc2;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.route-sequencer-optimo-status.error {
+  border-color: #ca7e6f;
+  background: rgba(66, 28, 24, 0.62);
+  color: #ffd9d0;
+}
+
+.route-sequencer-optimo-status.success {
+  border-color: #7db367;
+  background: rgba(28, 56, 20, 0.62);
+  color: #ddf6cc;
+}
+
 .route-sequencer-format-hint {
   border: 1px solid #5d7b42;
   border-radius: 10px;
@@ -9434,6 +9484,110 @@ body.sun-mode .multiday-manager-status {
   background: rgba(20, 30, 14, 0.38);
 }
 
+.route-sequencer-summary-modal-content {
+  width: min(1500px, 98vw);
+  max-width: 1500px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(120, 156, 63, 0.52);
+  background: linear-gradient(174deg, #1f2d17 0%, #15200f 100%);
+  color: #e5f4d2;
+  overflow: hidden;
+}
+
+.route-sequencer-summary-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.route-sequencer-summary-modal-head h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  color: #f5ffe8;
+}
+
+.route-sequencer-summary-modal-head p {
+  margin: 0;
+  font-size: 12px;
+  color: #cee6b1;
+}
+
+.modal-close-x {
+  border: 1px solid rgba(145, 174, 106, 0.65);
+  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  background: rgba(21, 32, 15, 0.78);
+  color: #f5ffe8;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.modal-close-x:hover {
+  background: rgba(66, 92, 43, 0.86);
+}
+
+.route-sequencer-summary-preview-status {
+  border: 1px solid #5a7440;
+  border-radius: 9px;
+  background: rgba(22, 34, 16, 0.7);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #e3f3d0;
+}
+
+.route-sequencer-summary-preview {
+  border: 1px solid rgba(111, 146, 74, 0.54);
+  border-radius: 10px;
+  background: rgba(12, 18, 9, 0.56);
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 280px;
+}
+
+.route-smart-summary-table {
+  width: 100%;
+  min-width: 2100px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.route-smart-summary-table th,
+.route-smart-summary-table td {
+  border-bottom: 1px solid rgba(94, 125, 62, 0.34);
+  border-right: 1px solid rgba(94, 125, 62, 0.24);
+  padding: 6px 7px;
+  text-align: left;
+  white-space: nowrap;
+  color: #d8eac1;
+}
+
+.route-smart-summary-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: rgba(27, 43, 18, 0.98);
+  color: #eaf9d8;
+  font-weight: 800;
+}
+
+.route-smart-summary-table thead tr:nth-child(2) th {
+  top: 28px;
+  background: rgba(34, 52, 24, 0.98);
+}
+
+.route-smart-summary-table tbody tr:nth-child(even) td {
+  background: rgba(20, 30, 14, 0.38);
+}
+
 .route-sequencer-report-card {
   border: 1px solid rgba(121, 157, 80, 0.55);
   border-radius: 10px;
@@ -9586,6 +9740,29 @@ body.sun-mode .route-sequencer-card h4 {
 
 body.sun-mode .route-sequencer-card p {
   color: #52703b;
+}
+
+body.sun-mode .route-sequencer-optimo-card {
+  border-color: #b7d28e;
+  background: linear-gradient(135deg, rgba(250, 255, 241, 0.98), rgba(239, 249, 226, 0.9));
+}
+
+body.sun-mode .route-sequencer-optimo-status {
+  border-color: #bfd39f;
+  background: rgba(247, 254, 237, 0.95);
+  color: #3d5a2a;
+}
+
+body.sun-mode .route-sequencer-optimo-status.error {
+  border-color: #d7a095;
+  background: #fff1ee;
+  color: #9a3526;
+}
+
+body.sun-mode .route-sequencer-optimo-status.success {
+  border-color: #9fc487;
+  background: #eef9e7;
+  color: #2c6324;
 }
 
 body.sun-mode .route-sequencer-format-hint {
@@ -9778,8 +9955,13 @@ body.sun-mode .route-sequencer-report-truncated {
   }
 
   .route-sequencer-grid,
-  .route-sequencer-manager-grid {
+  .route-sequencer-manager-grid,
+  .route-sequencer-optimo-grid {
     grid-template-columns: 1fr;
+  }
+
+  .route-sequencer-optimo-actions {
+    justify-content: flex-start;
   }
 
   .route-sequencer-output-grid {

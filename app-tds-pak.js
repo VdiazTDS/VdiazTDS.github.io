@@ -1142,7 +1142,10 @@ setCurrentFileDisplay(window._currentFilePath);
 
 // ================= MAP SETUP =================
 // Create Leaflet map
-const map = L.map("map", { preferCanvas: true }).setView([31.0, -99.0], 6);
+const map = L.map("map", { preferCanvas: true, boxZoom: false }).setView([31.0, -99.0], 6);
+try {
+  map.boxZoom?.disable?.();
+} catch (_) {}
 // Allow fractional zoom levels so wheel-step amounts like 0.25 and 0.5 are visible.
 map.options.zoomSnap = 0;
 map.options.zoomDelta = 0.25;
@@ -7828,6 +7831,84 @@ function getMapSelectionTargetLabel(targetValue = mapSelectionTarget) {
 
 let mapSelectionDrawMode = normalizeMapSelectionDrawMode(storageGet(MAP_SELECTION_DRAW_MODE_KEY) || "replace");
 let mapSelectionTarget = normalizeMapSelectionTarget(storageGet(MAP_SELECTION_TARGET_KEY) || "both");
+const selectionDrawModifierState = {
+  shiftKey: false,
+  active: false,
+  usedShiftDuringDraw: false,
+  lastShiftSelectionAt: 0
+};
+
+function rememberSelectionPointerModifiers(event) {
+  if (!event || typeof event.shiftKey !== "boolean") return;
+  selectionDrawModifierState.shiftKey = !!event.shiftKey;
+  if (selectionDrawModifierState.active && event.shiftKey) {
+    selectionDrawModifierState.usedShiftDuringDraw = true;
+    selectionDrawModifierState.lastShiftSelectionAt = Date.now();
+  }
+}
+
+window.addEventListener("keydown", event => {
+  if (event.key === "Shift" || event.shiftKey) {
+    selectionDrawModifierState.shiftKey = true;
+    if (selectionDrawModifierState.active) {
+      selectionDrawModifierState.usedShiftDuringDraw = true;
+      selectionDrawModifierState.lastShiftSelectionAt = Date.now();
+    }
+  }
+}, true);
+window.addEventListener("keyup", event => {
+  if (event.key === "Shift") selectionDrawModifierState.shiftKey = false;
+}, true);
+window.addEventListener("blur", () => {
+  selectionDrawModifierState.shiftKey = false;
+});
+
+try {
+  const selectionMapContainer = map?.getContainer?.();
+  if (selectionMapContainer) {
+    ["pointerdown", "pointermove", "pointerup", "mousedown", "mousemove", "mouseup"].forEach(eventName => {
+      selectionMapContainer.addEventListener(eventName, rememberSelectionPointerModifiers, true);
+    });
+  }
+} catch (_) {}
+
+function getSelectionDrawModeForEvent(event) {
+  const originalEvent = event?.originalEvent || event?.sourceEvent || event;
+  const hadRecentShiftDuringThisDraw =
+    selectionDrawModifierState.lastShiftSelectionAt > 0 &&
+    Date.now() - selectionDrawModifierState.lastShiftSelectionAt < 10000;
+  const shiftKey = selectionDrawModifierState.usedShiftDuringDraw ||
+    hadRecentShiftDuringThisDraw ||
+    (originalEvent && typeof originalEvent.shiftKey === "boolean"
+      ? originalEvent.shiftKey
+      : selectionDrawModifierState.shiftKey);
+  return shiftKey ? "add" : "replace";
+}
+
+function beginSelectionDrawSession() {
+  selectionDrawModifierState.active = true;
+  selectionDrawModifierState.usedShiftDuringDraw = !!selectionDrawModifierState.shiftKey;
+  selectionDrawModifierState.lastShiftSelectionAt = selectionDrawModifierState.shiftKey ? Date.now() : 0;
+  if (selectionDrawModifierState.usedShiftDuringDraw) {
+    selectionDrawModifierState.lastShiftSelectionAt = Date.now();
+  }
+  try {
+    map?.boxZoom?.disable?.();
+  } catch (_) {}
+}
+
+function endSelectionDrawSession() {
+  selectionDrawModifierState.active = false;
+  selectionDrawModifierState.usedShiftDuringDraw = false;
+  try {
+    map?.boxZoom?.disable?.();
+  } catch (_) {}
+}
+
+function setSelectionToolStatusMessage(message) {
+  const statusNode = document.getElementById("selectionToolsStatus");
+  if (statusNode) statusNode.textContent = String(message || "");
+}
 
 function setMapSelectionDrawMode(modeValue, persist = true) {
   mapSelectionDrawMode = normalizeMapSelectionDrawMode(modeValue);
@@ -8117,8 +8198,16 @@ const drawControl = new L.Control.Draw({
 
 map.addControl(drawControl);
 
+map.on(L.Draw.Event.DRAWSTART, event => {
+  const layerType = String(event?.layerType || "").toLowerCase();
+  if (layerType === "polygon" || layerType === "rectangle") {
+    beginSelectionDrawSession();
+  }
+});
+
 function startSelectionDrawTool(shapeType) {
   selectedLayerKey = null;
+  beginSelectionDrawSession();
   const drawToolbar = drawControl?._toolbars?.draw;
   const mode = drawToolbar?._modes?.[shapeType];
   if (mode?.handler && typeof mode.handler.enable === "function") {
@@ -8130,6 +8219,7 @@ function startSelectionDrawTool(shapeType) {
     fallbackBtn.click();
     return true;
   }
+  endSelectionDrawSession();
   return false;
 }
 
@@ -8141,7 +8231,7 @@ function clearDrawnSelectionGeometry() {
 }
 
 // ===== SELECTION COUNT FUNCTION (GLOBAL & CORRECT) =====
-function applyPolygonSelectionToStreets(polygonLayer) {
+function applyPolygonSelectionToStreets(polygonLayer, modeValue = mapSelectionDrawMode) {
   const streetSelectable = isLayerManagerEntrySelectable(LAYER_MANAGER_STREET_KEY);
   if (!streetSelectable) {
     const hadSelection = streetAttributeSelectedIds.size > 0;
@@ -8161,7 +8251,7 @@ function applyPolygonSelectionToStreets(polygonLayer) {
       if (!streetEntryIntersectsSelectionPolygon(entry, polygonLayer)) return;
       candidateStreetIds.add(id);
     });
-    nextSelectedStreetIds = combineSelectionIds(nextSelectedStreetIds, candidateStreetIds, mapSelectionDrawMode);
+    nextSelectedStreetIds = combineSelectionIds(nextSelectedStreetIds, candidateStreetIds, modeValue);
   }
 
   nextSelectedStreetIds = new Set(
@@ -8176,7 +8266,7 @@ function applyPolygonSelectionToStreets(polygonLayer) {
   return changed;
 }
 
-function applyPolygonSelectionToRecords(polygonBounds) {
+function applyPolygonSelectionToRecords(polygonBounds, modeValue = mapSelectionDrawMode) {
   if (selectedLayerKey && !isLayerManagerEntrySelectable(selectedLayerKey)) {
     selectedLayerKey = null;
   }
@@ -8218,7 +8308,7 @@ function applyPolygonSelectionToRecords(polygonBounds) {
   if (isLayerSelectMode) {
     nextSelectedRowIds = layerCandidateIds;
   } else if (polygonBounds) {
-    nextSelectedRowIds = combineSelectionIds(nextSelectedRowIds, polygonCandidateIds, mapSelectionDrawMode);
+    nextSelectedRowIds = combineSelectionIds(nextSelectedRowIds, polygonCandidateIds, modeValue);
   }
 
   Object.entries(routeDayGroups).forEach(([key, group]) => {
@@ -8238,9 +8328,10 @@ function applyPolygonSelectionToRecords(polygonBounds) {
   return changed;
 }
 
-function updateSelectionCount() {
+function updateSelectionCount(options = {}) {
   const polygon = drawnLayer.getLayers()[0] || null;
   const polygonBounds = polygon?.getBounds?.() || null;
+  const modeValue = options?.modeOverride || mapSelectionDrawMode;
   const hasManualSelectionScope = !!selectedLayerKey || !!polygonBounds;
   const hasSelectedRecords = !!attributeState?.selectedRowIds?.size;
   const hasSelectedStreets = !!streetAttributeSelectedIds?.size;
@@ -8256,11 +8347,11 @@ function updateSelectionCount() {
   let streetChanged = false;
 
   if (target === "streets" || target === "both") {
-    streetChanged = applyPolygonSelectionToStreets(polygon);
+    streetChanged = applyPolygonSelectionToStreets(polygon, modeValue);
   }
 
   if (target === "records" || target === "both") {
-    recordChanged = applyPolygonSelectionToRecords(polygonBounds);
+    recordChanged = applyPolygonSelectionToRecords(polygonBounds, modeValue);
   }
 
   syncSelectedStopsHeaderCount(getCurrentAttributeModeSelectionCount());
@@ -8305,11 +8396,20 @@ map.on(L.Draw.Event.CREATED, e => {
   selectedLayerKey = null;
   drawnLayer.clearLayers();
   drawnLayer.addLayer(e.layer);
-  updateSelectionCount();
+  const drawSelectionMode = getSelectionDrawModeForEvent(e);
+  updateSelectionCount({ modeOverride: drawSelectionMode });
+  drawnLayer.clearLayers();
+  const modeLabel = getMapSelectionModeLabel(drawSelectionMode);
+  const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
+  setSelectionToolStatusMessage(`${modeLabel} draw selection applied (${targetLabel}). ${getSelectionSummaryForTarget(mapSelectionTarget)}.`);
+  endSelectionDrawSession();
   updateUndoButtonState();   // ðŸ”¥ ADD THIS
 });
 
 map.on(L.Draw.Event.DRAWSTOP, () => {
+  setTimeout(() => {
+    if (selectionDrawModifierState.active) endSelectionDrawSession();
+  }, 0);
   if (!streetPolygonLoadPending) return;
   // Leaflet draw can emit DRAWSTOP before CREATED on some paths.
   // Defer cancel handling so CREATED can clear this flag first.
@@ -15350,6 +15450,7 @@ const ROUTE_SEQUENCER_MAX_SNAP_MILES = 1.0;
 const ROUTE_SEQUENCER_DEFAULT_CAPACITY_TONS = 13.5;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_MPH = 35;
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH = 30;
+const OPTIMOROUTE_KEY_FILE_MAX_BYTES = 8192;
 const ROUTE_SEQUENCER_DEFAULT_SPEED_CLASS_FIELD = "speed_cat";
 const ROUTE_SEQUENCER_DEFAULT_SERVICE_STOPS_BEFORE_DEADHEAD = true;
 const ROUTE_SEQUENCER_REQUIRE_NETWORK_ONLY = true;
@@ -15385,6 +15486,11 @@ const ROUTE_SEQUENCER_DEFAULT_SERVICE_SPEED_CAT_MAP = Object.freeze({
 const ROUTE_SEQUENCER_DEFAULT_CLASS_SPEEDS = {
   ...ROUTE_SEQUENCER_DEFAULT_DRIVING_SPEED_CAT_MAP
 }; // Legacy alias.
+const optimoRouteSessionCredentialState = {
+  apiKey: "",
+  sourceName: "",
+  loadedAt: 0
+};
 const ROUTE_SEQUENCER_STREET_CLASS_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 const ROUTE_SEQUENCER_DEFAULT_STREET_CLASS_ATTR_MAP = Object.freeze({
   1: Object.freeze({ travelTypesAllowed: "Any", serviceSide: "Same", crossPenaltyMinutes: 5, uTurnsRestricted: true }),
@@ -15409,6 +15515,11 @@ const ROUTE_SEQUENCER_DEFAULT_STREET_ATTRIBUTE_DEFAULTS = Object.freeze({
 const ROUTE_SEQUENCER_UTURN_RESTRICTED_PENALTY_MINUTES = 6;
 const ROUTE_SEQUENCER_UTURN_CULDESAC_ONLY_PENALTY_MINUTES = 8;
 const ROUTE_SEQUENCER_UTURN_PRORATE_DRIVING_FACTOR = 0.15;
+const ROUTE_SEQUENCER_OPTIMIZER_DISPOSAL_PULL_START = 0.55;
+const ROUTE_SEQUENCER_OPTIMIZER_DISPOSAL_PULL_WEIGHT = 0.55;
+const ROUTE_SEQUENCER_OPTIMIZER_END_PULL_WEIGHT = 0.32;
+const ROUTE_SEQUENCER_OPTIMIZER_LOOKAHEAD_LIMIT = 90;
+const ROUTE_SEQUENCER_OPTIMIZER_LOOKAHEAD_WEIGHT = 0.12;
 const ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS = Object.freeze({
   sequence: "SEQNO",
   trip: "TRIP",
@@ -17092,6 +17203,158 @@ function pickNearestRouteSequencerCandidate(currentPoint, candidates, graph, fal
   return best;
 }
 
+function mergeRouteSequencerCandidateAdjustments(...items) {
+  const merged = {
+    scoreMinutesDelta: 0,
+    driveMinutesDelta: 0,
+    serviceMinutesDelta: 0,
+    otherMinutesDelta: 0,
+    notes: []
+  };
+  items.forEach(item => {
+    const normalized = normalizeRouteSequencerCandidateAdjustment(item);
+    merged.scoreMinutesDelta += normalized.scoreMinutesDelta;
+    merged.driveMinutesDelta += normalized.driveMinutesDelta;
+    merged.serviceMinutesDelta += normalized.serviceMinutesDelta;
+    merged.otherMinutesDelta += normalized.otherMinutesDelta;
+    normalized.notes.forEach(note => {
+      if (note && !merged.notes.includes(note)) merged.notes.push(note);
+    });
+  });
+  return merged;
+}
+
+function estimateRouteSequencerPointMinutes(fromPoint, toPoint, fallbackSpeedMph, fallbackServiceSpeedMph, travelMode = "driving") {
+  if (!fromPoint || !toPoint) return NaN;
+  return estimateRouteSequencerTravelMinutes(
+    fromPoint,
+    toPoint,
+    fallbackSpeedMph,
+    {
+      travelMode,
+      fallbackServiceSpeedMph
+    }
+  );
+}
+
+function getNearestRouteSequencerPointEstimate(fromPoint, points, fallbackSpeedMph, fallbackServiceSpeedMph, travelMode = "driving", excludeId = "") {
+  const source = Array.isArray(points) ? points : [];
+  let best = null;
+  source.forEach(point => {
+    if (!point) return;
+    if (excludeId && String(point.id || "") === String(excludeId)) return;
+    const minutes = estimateRouteSequencerPointMinutes(
+      fromPoint,
+      point,
+      fallbackSpeedMph,
+      fallbackServiceSpeedMph,
+      travelMode
+    );
+    if (!Number.isFinite(minutes)) return;
+    const miles = estimateRouteSequencerTravelMiles(fromPoint, point);
+    if (!best || minutes < best.minutes - 1e-9 || (Math.abs(minutes - best.minutes) <= 1e-9 && miles < best.miles)) {
+      best = {
+        point,
+        minutes,
+        miles: Number.isFinite(miles) ? miles : 0
+      };
+    }
+  });
+  return best;
+}
+
+function buildRouteSequencerEfficiencyAdjustment(context = {}) {
+  const candidate = context.candidate || null;
+  if (!candidate) return normalizeRouteSequencerCandidateAdjustment(null);
+
+  const adjustment = {
+    scoreMinutesDelta: 0,
+    driveMinutesDelta: 0,
+    serviceMinutesDelta: 0,
+    otherMinutesDelta: 0,
+    notes: []
+  };
+  const fallbackSpeedMph = clampRouteSequencerNumber(
+    context.fallbackSpeedMph,
+    5,
+    85,
+    ROUTE_SEQUENCER_DEFAULT_SPEED_MPH
+  );
+  const fallbackServiceSpeedMph = clampRouteSequencerNumber(
+    context.fallbackServiceSpeedMph,
+    5,
+    85,
+    Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
+  );
+  const capacityTons = Number(context.capacityTons);
+  const currentLoad = Math.max(0, Number(context.currentLoad) || 0);
+  const demand = Math.max(0, Number(candidate.demand) || 0);
+  const dumpPoints = Array.isArray(context.dumpPoints) ? context.dumpPoints.filter(Boolean) : [];
+  const candidateList = Array.isArray(context.candidateList) ? context.candidateList.filter(Boolean) : [];
+
+  if (Number.isFinite(capacityTons) && capacityTons > 0 && dumpPoints.length) {
+    const projectedLoadRatio = Math.max(0, (currentLoad + demand) / capacityTons);
+    const pullRange = Math.max(0.01, 1 - ROUTE_SEQUENCER_OPTIMIZER_DISPOSAL_PULL_START);
+    const disposalPull = Math.max(
+      0,
+      Math.min(1, (projectedLoadRatio - ROUTE_SEQUENCER_OPTIMIZER_DISPOSAL_PULL_START) / pullRange)
+    );
+    if (disposalPull > 0) {
+      const nearestDump = getNearestRouteSequencerPointEstimate(
+        candidate,
+        dumpPoints,
+        fallbackSpeedMph,
+        fallbackServiceSpeedMph,
+        "driving"
+      );
+      if (nearestDump && Number.isFinite(nearestDump.minutes)) {
+        const weightedDumpMinutes = nearestDump.minutes
+          * (disposalPull ** 2)
+          * ROUTE_SEQUENCER_OPTIMIZER_DISPOSAL_PULL_WEIGHT;
+        adjustment.scoreMinutesDelta += Math.max(0, weightedDumpMinutes);
+      }
+    }
+  }
+
+  const terminalPoint = context.endPoint || null;
+  const initialStopCount = Math.max(1, Number(context.initialStopCount) || candidateList.length || 1);
+  const remainingAfterCandidate = Math.max(0, Number(context.unservedCount || candidateList.length) - 1);
+  const routeProgress = Math.max(0, Math.min(1, 1 - (remainingAfterCandidate / initialStopCount)));
+  const lateRoutePull = remainingAfterCandidate <= 8
+    ? Math.max(routeProgress, (9 - remainingAfterCandidate) / 9)
+    : routeProgress ** 2;
+  if (terminalPoint && lateRoutePull > 0.05) {
+    const terminalMinutes = estimateRouteSequencerPointMinutes(
+      candidate,
+      terminalPoint,
+      fallbackSpeedMph,
+      fallbackServiceSpeedMph,
+      "driving"
+    );
+    if (Number.isFinite(terminalMinutes)) {
+      adjustment.scoreMinutesDelta += terminalMinutes
+        * Math.min(1, lateRoutePull)
+        * ROUTE_SEQUENCER_OPTIMIZER_END_PULL_WEIGHT;
+    }
+  }
+
+  if (candidateList.length > 2 && candidateList.length <= ROUTE_SEQUENCER_OPTIMIZER_LOOKAHEAD_LIMIT) {
+    const nearestNext = getNearestRouteSequencerPointEstimate(
+      candidate,
+      candidateList,
+      fallbackSpeedMph,
+      fallbackServiceSpeedMph,
+      "service",
+      candidate.id
+    );
+    if (nearestNext && Number.isFinite(nearestNext.minutes)) {
+      adjustment.scoreMinutesDelta += nearestNext.minutes * ROUTE_SEQUENCER_OPTIMIZER_LOOKAHEAD_WEIGHT;
+    }
+  }
+
+  return adjustment;
+}
+
 function routeSequencerSplitRouteDayKey(key) {
   const text = String(key || "");
   const idx = text.lastIndexOf("|");
@@ -17337,6 +17600,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
 
   let fixedFirstStop = null;
   let fixedLastStop = null;
+  const initialRouteStopCount = routeStops.length;
   if (!startDepot && routeStops.length) {
     fixedFirstStop = routeStops[0];
     unserved.delete(fixedFirstStop.id);
@@ -17484,14 +17748,30 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       travelMode: "service",
       fallbackServiceSpeedMph,
       requireNetworkOnly,
-      candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) =>
-        buildRouteSequencerServiceCandidateAdjustment(
+      candidateAdjustmentFn: ({ fromPoint, candidate, minutes }) => {
+        const serviceAdjustment = buildRouteSequencerServiceCandidateAdjustment(
           fromPoint,
           candidate,
           minutes,
           streetAttributeDefaults,
           meanderOverrideDefaults
-        )
+        );
+        const efficiencyAdjustment = buildRouteSequencerEfficiencyAdjustment({
+          fromPoint,
+          candidate,
+          baseMinutes: minutes,
+          currentLoad,
+          capacityTons,
+          dumpPoints,
+          endPoint: endDepot || fixedLastStop || null,
+          unservedCount: candidateList.length,
+          initialStopCount: initialRouteStopCount,
+          candidateList,
+          fallbackSpeedMph,
+          fallbackServiceSpeedMph
+        });
+        return mergeRouteSequencerCandidateAdjustments(serviceAdjustment, efficiencyAdjustment);
+      }
     }
   );
 
@@ -18504,6 +18784,340 @@ function renderRouteSequencerResultsList(node, plans) {
   node.innerHTML = `${summaryTableHtml}${detailHtml}`;
 }
 
+function getRouteSequencerPlanBreakdownForSummary(plan) {
+  const events = Array.isArray(plan?.events) ? plan.events : [];
+  const stops = Array.isArray(plan?.stopVisits) ? plan.stopVisits : [];
+  const startMinutesFromEvents = events
+    .filter(event => String(event?.type || "") === "timeAtStart")
+    .reduce((sum, event) => sum + Math.max(0, Number(event?.facilityMinutes) || 0), 0);
+  const endMinutesFromEvents = events
+    .filter(event => String(event?.type || "") === "timeAtEnd")
+    .reduce((sum, event) => sum + Math.max(0, Number(event?.facilityMinutes) || 0), 0);
+  const dumpFacilityMinutesFromEvents = events
+    .filter(event => String(event?.type || "") === "dump")
+    .reduce((sum, event) => sum + Math.max(0, Number(event?.facilityMinutes) || 0), 0);
+  const breakMinutesFromEvents = events
+    .filter(event => String(event?.type || "") === "break")
+    .reduce((sum, event) => sum + Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0), 0);
+  const otherMinutesFromEvents = events.reduce((sum, event) => {
+    const type = String(event?.type || "");
+    if (type === "break") return sum;
+    if (type === "otherTime") {
+      return sum + Math.max(0, Number(event?.minutes ?? event?.otherMinutes) || 0);
+    }
+    return sum + Math.max(0, Number(event?.otherMinutes) || 0);
+  }, 0);
+  const serviceFromStops = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.serviceMinutes) || 0), 0);
+  const demandTons = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0);
+  const driveMinutes = Math.max(0, Number(plan?.totalDriveMinutes) || 0);
+  const driveMilesFromEvents = events.reduce((sum, event) => sum + Math.max(0, Number(event?.driveMiles) || 0), 0);
+  const driveMiles = Number.isFinite(Number(plan?.totalDriveMiles))
+    ? Math.max(0, Number(plan.totalDriveMiles))
+    : driveMilesFromEvents;
+  const serviceMinutes = Math.max(serviceFromStops, Math.max(0, Number(plan?.totalServiceMinutes) || 0));
+  const dumpFacilityMinutes = Number.isFinite(Number(plan?.totalDumpFacilityMinutes))
+    ? Math.max(0, Number(plan.totalDumpFacilityMinutes))
+    : dumpFacilityMinutesFromEvents;
+  const breakMinutes = Number.isFinite(Number(plan?.totalBreakMinutes))
+    ? Math.max(0, Number(plan.totalBreakMinutes))
+    : breakMinutesFromEvents;
+  const otherMinutesFromPlanTotal = Number.isFinite(Number(plan?.totalOtherMinutes))
+    ? Math.max(0, Number(plan.totalOtherMinutes))
+    : NaN;
+  const otherMinutes = Number.isFinite(otherMinutesFromPlanTotal)
+    ? Math.max(0, otherMinutesFromPlanTotal - breakMinutes)
+    : otherMinutesFromEvents;
+  const startMinutes = startMinutesFromEvents;
+  const endMinutes = endMinutesFromEvents;
+  const facilityMinutesFromPlan = Number.isFinite(Number(plan?.totalFacilityMinutes))
+    ? Math.max(0, Number(plan.totalFacilityMinutes))
+    : NaN;
+  const facilityMinutesFromEvents = dumpFacilityMinutes + startMinutes + endMinutes;
+  const facilityMinutesResolved = Number.isFinite(facilityMinutesFromPlan)
+    ? facilityMinutesFromPlan
+    : facilityMinutesFromEvents;
+  const totalMinutesResolved = driveMinutes + serviceMinutes + facilityMinutesResolved + breakMinutes + otherMinutes;
+
+  return {
+    driveMinutes,
+    driveMiles,
+    serviceMinutes,
+    dumpFacilityMinutes,
+    breakMinutes,
+    startMinutes,
+    endMinutes,
+    facilityMinutes: facilityMinutesResolved,
+    otherMinutes,
+    totalMinutes: totalMinutesResolved,
+    demandTons
+  };
+}
+
+function minutesToExcelDays(minutesValue) {
+  const minutes = Number(minutesValue);
+  return Number.isFinite(minutes) ? Math.max(0, minutes) / 1440 : "";
+}
+
+function roundRouteSequencerSummaryNumber(value, digits = 2) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "";
+  const factor = 10 ** Math.max(0, Number(digits) || 0);
+  return Math.round(num * factor) / factor;
+}
+
+function getRouteSequencerEventDriveMinutes(event) {
+  return Math.max(0, Number(event?.driveMinutes) || 0);
+}
+
+function getRouteSequencerEventDriveMiles(event) {
+  return Math.max(0, Number(event?.driveMiles) || 0);
+}
+
+function getRouteSequencerFacilityNameFromEvents(events, eventType) {
+  const event = (Array.isArray(events) ? events : []).find(item => String(item?.type || "") === eventType);
+  return String(event?.name || "").trim();
+}
+
+function summarizeRouteSequencerPlanForRouteSmart(plan) {
+  const events = Array.isArray(plan?.events) ? plan.events : [];
+  const stops = Array.isArray(plan?.stopVisits) ? plan.stopVisits : [];
+  const breakdown = getRouteSequencerPlanBreakdownForSummary(plan);
+  const stopCount = stops.length;
+  const tripSet = new Set(
+    stops
+      .map(visit => Number(visit?.trip))
+      .filter(value => Number.isFinite(value) && value > 0)
+  );
+  const tripCount = tripSet.size || Math.max(1, Number(plan?.dumpVisits) + 1 || 1);
+  let firstStopDriveMinutes = 0;
+  let firstStopDriveMiles = 0;
+  let sawFirstStop = false;
+  let stemToEndMinutes = 0;
+  let stemToEndMiles = 0;
+  let timeToIntermediateMinutes = 0;
+  let timeFromIntermediateMinutes = 0;
+  let previousType = "";
+
+  events.forEach(event => {
+    const type = String(event?.type || "");
+    if (type === "stop" && !sawFirstStop) {
+      firstStopDriveMinutes = getRouteSequencerEventDriveMinutes(event);
+      firstStopDriveMiles = getRouteSequencerEventDriveMiles(event);
+      sawFirstStop = true;
+    }
+    if (type === "dump") {
+      timeToIntermediateMinutes += getRouteSequencerEventDriveMinutes(event);
+    }
+    if (type === "stop" && previousType === "dump") {
+      timeFromIntermediateMinutes += getRouteSequencerEventDriveMinutes(event);
+    }
+    if (type === "endDepot") {
+      stemToEndMinutes += getRouteSequencerEventDriveMinutes(event);
+      stemToEndMiles += getRouteSequencerEventDriveMiles(event);
+    }
+    previousType = type;
+  });
+
+  const travelWithoutServiceMinutes = Math.min(
+    breakdown.driveMinutes,
+    firstStopDriveMinutes + stemToEndMinutes + timeToIntermediateMinutes + timeFromIntermediateMinutes
+  );
+  const travelWhileServicingMinutes = Math.max(0, breakdown.driveMinutes - travelWithoutServiceMinutes);
+  const waitMinutes = 0;
+  const extraMinutes = breakdown.otherMinutes;
+  const nptWithinRouteMinutes = breakdown.startMinutes + extraMinutes + waitMinutes + breakdown.breakMinutes + breakdown.endMinutes;
+
+  return {
+    route: String(plan?.route || "Unassigned"),
+    day: String(plan?.day || ""),
+    startLocation: getRouteSequencerFacilityNameFromEvents(events, "startDepot"),
+    endLocation: getRouteSequencerFacilityNameFromEvents(events, "endDepot"),
+    sequencedStops: stopCount,
+    unsequencedStops: 0,
+    totalStops: stopCount,
+    timeAtStartMinutes: breakdown.startMinutes,
+    serviceMinutes: breakdown.serviceMinutes,
+    extraMinutes,
+    waitMinutes,
+    breakMinutes: breakdown.breakMinutes,
+    facilityMinutes: breakdown.dumpFacilityMinutes,
+    stemFromStartMinutes: firstStopDriveMinutes,
+    stemToEndMinutes,
+    timeToIntermediateMinutes,
+    timeFromIntermediateMinutes,
+    nptWithinRouteMinutes,
+    travelWithoutServiceMinutes,
+    travelWhileServicingMinutes,
+    timeAtEndMinutes: breakdown.endMinutes,
+    totalMinutes: breakdown.totalMinutes,
+    demandTons: breakdown.demandTons,
+    stemDistanceFromStart: firstStopDriveMiles,
+    stemDistanceToEnd: stemToEndMiles,
+    totalDistanceMiles: breakdown.driveMiles,
+    tripCount
+  };
+}
+
+function makeRouteSequencerBenchmarkSummaryFileName() {
+  const baseRaw = getDownloadBaseName(window._currentFilePath || "RouteSummary")
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.[^.]+$/, "");
+  const safeBase = String(baseRaw || "RouteSummary")
+    .replace(/[^a-z0-9._-]+/gi, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${safeBase || "RouteSummary"}_Benchmark_RouteSmartSequence.xlsx`;
+}
+
+function getRouteSequencerBenchmarkSummaryHeaderRows() {
+  return {
+    headerRow1: [
+      "Route ID", "Day", "Start Time", "End Time", "Start", "End", "Seq", "UnSeq", "Total",
+      "Time at", "Service", "Extra Time", "Wait", "Break", "Facility", "Stem Time From Start",
+      "Stem Time to End", "Time To Intermediate", "Time From Intermediate", "NPT Within Route",
+      "Travel Without", "Travel While", "Time at", "Total", "Demand", "Stem Distance from Start",
+      "Stem Distance to End", "Distance", "Number"
+    ],
+    headerRow2: [
+      "", "", "", "", "Location", "Location", "Stops", "Stops", "Stops", "Start", "Time", "",
+      "Time", "Time", "Time", "", "", "", "", "", "Service", "Servicing", "End", "Time", "",
+      "", "", "(Miles)", "of Trips"
+    ]
+  };
+}
+
+function getSortedRouteSequencerPlansForSummary(plans) {
+  return (Array.isArray(plans) ? plans : [])
+    .filter(Boolean)
+    .slice()
+    .sort((a, b) => {
+      const keyA = `${a?.route || ""}|${a?.day || ""}`;
+      const keyB = `${b?.route || ""}|${b?.day || ""}`;
+      return keyA.localeCompare(keyB, undefined, { sensitivity: "base", numeric: true });
+    });
+}
+
+function getRouteSequencerBenchmarkSummaryRows(plans, useExcelDurations = false) {
+  return getSortedRouteSequencerPlansForSummary(plans).map(plan => {
+    const summary = summarizeRouteSequencerPlanForRouteSmart(plan);
+    const durationValue = minutes => useExcelDurations
+      ? minutesToExcelDays(minutes)
+      : formatRouteSequencerMinutesClock(minutes);
+    return [
+      summary.route,
+      summary.day,
+      "",
+      "",
+      summary.startLocation,
+      summary.endLocation,
+      summary.sequencedStops,
+      summary.unsequencedStops,
+      summary.totalStops,
+      durationValue(summary.timeAtStartMinutes),
+      durationValue(summary.serviceMinutes),
+      durationValue(summary.extraMinutes),
+      durationValue(summary.waitMinutes),
+      durationValue(summary.breakMinutes),
+      durationValue(summary.facilityMinutes),
+      durationValue(summary.stemFromStartMinutes),
+      durationValue(summary.stemToEndMinutes),
+      durationValue(summary.timeToIntermediateMinutes),
+      durationValue(summary.timeFromIntermediateMinutes),
+      durationValue(summary.nptWithinRouteMinutes),
+      durationValue(summary.travelWithoutServiceMinutes),
+      durationValue(summary.travelWhileServicingMinutes),
+      durationValue(summary.timeAtEndMinutes),
+      durationValue(summary.totalMinutes),
+      roundRouteSequencerSummaryNumber(summary.demandTons, 2),
+      roundRouteSequencerSummaryNumber(summary.stemDistanceFromStart, 1),
+      roundRouteSequencerSummaryNumber(summary.stemDistanceToEnd, 1),
+      roundRouteSequencerSummaryNumber(summary.totalDistanceMiles, 1),
+      summary.tripCount
+    ];
+  });
+}
+
+function renderRouteSequencerBenchmarkSummaryPreview(plans) {
+  const entries = getSortedRouteSequencerPlansForSummary(plans);
+  if (!entries.length) {
+    return '<div class="route-sequencer-results-empty">Run Benchmark Existing Sequence or Auto Sequence to build a summary.</div>';
+  }
+  const { headerRow1, headerRow2 } = getRouteSequencerBenchmarkSummaryHeaderRows();
+  const rows = getRouteSequencerBenchmarkSummaryRows(entries, false);
+  const renderCell = (value, tagName = "td") =>
+    `<${tagName}>${escapeRouteSequencerHtml(value)}</${tagName}>`;
+  const headerHtml = `
+    <thead>
+      <tr>${headerRow1.map(value => renderCell(value, "th")).join("")}</tr>
+      <tr>${headerRow2.map(value => renderCell(value, "th")).join("")}</tr>
+    </thead>
+  `;
+  const bodyHtml = rows
+    .map(row => `<tr>${row.map(value => renderCell(value)).join("")}</tr>`)
+    .join("");
+  return `
+    <table class="route-smart-summary-table">
+      ${headerHtml}
+      <tbody>${bodyHtml}</tbody>
+    </table>
+  `;
+}
+
+function exportRouteSequencerBenchmarkSummary(plans, options = {}) {
+  const entries = (Array.isArray(plans) ? plans : []).filter(Boolean);
+  if (!entries.length) {
+    options?.setStatus?.("Run Benchmark Existing Sequence or Auto Sequence before exporting a RouteSmart summary.", "error");
+    return false;
+  }
+  if (typeof XLSX === "undefined" || !XLSX?.utils || typeof XLSX.writeFile !== "function") {
+    options?.setStatus?.("Excel export library is not available on this page.", "error");
+    return false;
+  }
+
+  const { headerRow1, headerRow2 } = getRouteSequencerBenchmarkSummaryHeaderRows();
+  const rows = getRouteSequencerBenchmarkSummaryRows(entries, true);
+
+  const worksheet = XLSX.utils.aoa_to_sheet([headerRow1, headerRow2, ...rows, Array(headerRow1.length).fill("")]);
+  worksheet["!cols"] = [
+    { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 24 }, { wch: 24 },
+    { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 10 }, { wch: 11 },
+    { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 18 }, { wch: 18 }, { wch: 21 },
+    { wch: 22 }, { wch: 18 }, { wch: 17 }, { wch: 17 }, { wch: 10 }, { wch: 10 },
+    { wch: 10 }, { wch: 24 }, { wch: 20 }, { wch: 12 }, { wch: 10 }
+  ];
+  worksheet["!autofilter"] = { ref: `A2:AC${Math.max(2, rows.length + 2)}` };
+
+  const durationColumns = [2, 3, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+  const integerColumns = [6, 7, 8, 28];
+  const oneDecimalColumns = [25, 26, 27];
+  const twoDecimalColumns = [24];
+  for (let rowIndex = 2; rowIndex < rows.length + 2; rowIndex += 1) {
+    durationColumns.forEach(columnIndex => {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      if (worksheet[address]) worksheet[address].z = "[h]:mm";
+    });
+    integerColumns.forEach(columnIndex => {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      if (worksheet[address]) worksheet[address].z = "0";
+    });
+    oneDecimalColumns.forEach(columnIndex => {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      if (worksheet[address]) worksheet[address].z = "0.0";
+    });
+    twoDecimalColumns.forEach(columnIndex => {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      if (worksheet[address]) worksheet[address].z = "0.00";
+    });
+  }
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
+  XLSX.writeFile(workbook, makeRouteSequencerBenchmarkSummaryFileName());
+  options?.setStatus?.(`Exported RouteSmart-style summary for ${rows.length.toLocaleString()} route/day group(s).`, "success");
+  return true;
+}
+
 function loadRouteSequencerSettings() {
   const raw = storageGet(ROUTE_SEQUENCER_SETTINGS_KEY);
   if (!raw) {
@@ -18585,6 +19199,92 @@ function saveRouteSequencerSettings(settings) {
   storageSet(ROUTE_SEQUENCER_SETTINGS_KEY, JSON.stringify(payload));
   setRouteSequencerActiveOutputFields(payload.outputFields);
 }
+
+function normalizeOptimoRouteApiKeyText(rawValue) {
+  return String(rawValue || "")
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .trim();
+}
+
+function extractOptimoRouteApiKeyFromText(fileText) {
+  const lines = String(fileText || "")
+    .split(/\r?\n/)
+    .map(line => String(line || "").trim())
+    .filter(line => line && !line.startsWith("#"));
+  const firstLine = lines[0] || "";
+  const keyValueMatch = firstLine.match(/^(?:OPTIMOROUTE_API_KEY|OPTIMO_ROUTE_API_KEY|API_KEY|KEY)\s*[:=]\s*(.+)$/i);
+  return normalizeOptimoRouteApiKeyText(keyValueMatch ? keyValueMatch[1] : firstLine);
+}
+
+function maskOptimoRouteApiKey(apiKey) {
+  const key = String(apiKey || "").trim();
+  if (!key) return "";
+  if (key.length <= 8) return `${"*".repeat(Math.max(0, key.length - 2))}${key.slice(-2)}`;
+  return `${key.slice(0, 4)}${"*".repeat(Math.min(16, Math.max(4, key.length - 8)))}${key.slice(-4)}`;
+}
+
+function setOptimoRouteSessionApiKey(apiKey, sourceName = "") {
+  const normalized = normalizeOptimoRouteApiKeyText(apiKey);
+  if (!normalized || normalized.length < 8) {
+    throw new Error("The selected file did not contain a valid-looking OptimoRoute API key.");
+  }
+  optimoRouteSessionCredentialState.apiKey = normalized;
+  optimoRouteSessionCredentialState.sourceName = String(sourceName || "local key file").trim() || "local key file";
+  optimoRouteSessionCredentialState.loadedAt = Date.now();
+  return { ...optimoRouteSessionCredentialState };
+}
+
+function clearOptimoRouteSessionApiKey() {
+  optimoRouteSessionCredentialState.apiKey = "";
+  optimoRouteSessionCredentialState.sourceName = "";
+  optimoRouteSessionCredentialState.loadedAt = 0;
+}
+
+function hasOptimoRouteSessionApiKey() {
+  return !!String(optimoRouteSessionCredentialState.apiKey || "").trim();
+}
+
+function getOptimoRouteSessionApiKey() {
+  return String(optimoRouteSessionCredentialState.apiKey || "").trim();
+}
+
+function readOptimoRouteApiKeyFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error("Choose a local text file that contains the OptimoRoute API key."));
+      return;
+    }
+    if (Number(file.size) > OPTIMOROUTE_KEY_FILE_MAX_BYTES) {
+      reject(new Error("The selected key file is too large. Use a small text file that contains only the API key."));
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Unable to read the selected OptimoRoute key file."));
+    reader.onload = () => {
+      try {
+        const apiKey = extractOptimoRouteApiKeyFromText(reader.result);
+        resolve(setOptimoRouteSessionApiKey(apiKey, file.name || "local key file"));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    reader.readAsText(file);
+  });
+}
+
+function getOptimoRouteCredentialStatusText() {
+  if (!hasOptimoRouteSessionApiKey()) {
+    return "No key loaded. Browser security does not allow TDS-PAK to read a pasted file path; use Choose File to grant one-session access.";
+  }
+  const sourceName = optimoRouteSessionCredentialState.sourceName || "local key file";
+  const maskedKey = maskOptimoRouteApiKey(getOptimoRouteSessionApiKey());
+  return `Loaded ${sourceName} for this session only (${maskedKey}). The key will clear when the page reloads.`;
+}
+
+window.hasTdsPakOptimoRouteSessionKey = hasOptimoRouteSessionApiKey;
+window.clearTdsPakOptimoRouteSessionKey = clearOptimoRouteSessionApiKey;
 
 function initFacilitiesControls() {
   const openBtn = document.getElementById("facilitiesBtn");
@@ -18854,6 +19554,14 @@ function initRouteSequencerControls() {
   const closeBtn = document.getElementById("routeSequencerCloseBtn");
   const evaluateBtn = document.getElementById("routeSequencerEvaluateBtn");
   const runBtn = document.getElementById("routeSequencerRunBtn");
+  const viewSummaryBtn = document.getElementById("routeSequencerViewSummaryBtn");
+  const exportSummaryBtn = document.getElementById("routeSequencerExportSummaryBtn");
+  const summaryModal = document.getElementById("routeSequencerSummaryModal");
+  const summaryPreviewNode = document.getElementById("routeSequencerSummaryPreview");
+  const summaryPreviewStatus = document.getElementById("routeSequencerSummaryPreviewStatus");
+  const summaryCloseBtn = document.getElementById("routeSequencerSummaryCloseBtn");
+  const summaryCloseX = document.getElementById("routeSequencerSummaryCloseX");
+  const summaryExportBtn = document.getElementById("routeSequencerSummaryExportBtn");
   const demandFieldSelect = document.getElementById("routeSequencerDemandField");
   const serviceFieldSelect = document.getElementById("routeSequencerServiceTimeField");
   const sequenceOutputSelect = document.getElementById("routeSequencerSequenceOutputField");
@@ -18896,6 +19604,9 @@ function initRouteSequencerControls() {
   const customDumpSelect = document.getElementById("routeSequencerCustomDumpSelect");
   const addDumpBtn = document.getElementById("routeSequencerAddDumpBtn");
   const removeDumpBtn = document.getElementById("routeSequencerRemoveDumpBtn");
+  const optimoRouteKeyFileInput = document.getElementById("routeSequencerOptimoKeyFile");
+  const optimoRouteClearKeyBtn = document.getElementById("routeSequencerOptimoClearKeyBtn");
+  const optimoRouteStatusNode = document.getElementById("routeSequencerOptimoStatus");
   const statusNode = document.getElementById("routeSequencerStatus");
   const resultsNode = document.getElementById("routeSequencerResults");
   const drivingSpeedCatInputs = {
@@ -18979,7 +19690,9 @@ function initRouteSequencerControls() {
   };
 
   if (
-    !openBtn || !modal || !closeBtn || !evaluateBtn || !runBtn || !demandFieldSelect || !serviceFieldSelect ||
+    !openBtn || !modal || !closeBtn || !evaluateBtn || !runBtn || !viewSummaryBtn || !exportSummaryBtn ||
+    !summaryModal || !summaryPreviewNode || !summaryPreviewStatus || !summaryCloseBtn || !summaryCloseX || !summaryExportBtn ||
+    !demandFieldSelect || !serviceFieldSelect ||
     !sequenceOutputSelect || !tripOutputSelect || !cumulativeOutputSelect || !driveOutputSelect ||
     !serviceOutputSelect || !totalOutputSelect || !dumpVisitsOutputSelect || !formatHintNode ||
     !scopeListSelect || !scopeAllBtn || !scopeNoneBtn || !scopeVisibleBtn ||
@@ -18993,6 +19706,7 @@ function initRouteSequencerControls() {
     !timeAtStartInput || !timeAtEndInput || !breaksInput ||
     !dumpBeforeEndToggle || !depotNameInput || !addDepotBtn || !removeDepotBtn ||
     !dumpNameInput || !customDumpSelect || !addDumpBtn || !removeDumpBtn ||
+    !optimoRouteKeyFileInput || !optimoRouteClearKeyBtn || !optimoRouteStatusNode ||
     !statusNode || !resultsNode ||
     Object.values(drivingSpeedCatInputs).some(node => !node) ||
     Object.values(serviceSpeedCatInputs).some(node => !node) ||
@@ -19011,6 +19725,7 @@ function initRouteSequencerControls() {
   loadRouteSequencerSettings();
   let routeSequencerTaskRunning = false;
   let routeSequencerOpenCheckRunning = false;
+  let lastRouteSequencerPlans = [];
 
   const setStatus = (message, kind = "") => {
     statusNode.textContent = String(message || "");
@@ -19022,6 +19737,19 @@ function initRouteSequencerControls() {
     }
   };
 
+  const setOptimoRouteStatus = (message = "", kind = "") => {
+    optimoRouteStatusNode.textContent = String(message || getOptimoRouteCredentialStatusText());
+    optimoRouteStatusNode.classList.remove("error", "success");
+    if (kind === "error") optimoRouteStatusNode.classList.add("error");
+    if (kind === "success") optimoRouteStatusNode.classList.add("success");
+  };
+
+  const refreshOptimoRouteCredentialUi = () => {
+    const hasKey = hasOptimoRouteSessionApiKey();
+    optimoRouteClearKeyBtn.disabled = !hasKey;
+    setOptimoRouteStatus(getOptimoRouteCredentialStatusText(), hasKey ? "success" : "");
+  };
+
   const yieldRouteSequencerUi = async () => {
     await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
   };
@@ -19031,6 +19759,9 @@ function initRouteSequencerControls() {
     routeSequencerTaskRunning = next;
     evaluateBtn.disabled = next;
     runBtn.disabled = next;
+    viewSummaryBtn.disabled = next || !lastRouteSequencerPlans.length;
+    exportSummaryBtn.disabled = next || !lastRouteSequencerPlans.length;
+    summaryExportBtn.disabled = next || !lastRouteSequencerPlans.length;
     if (next) {
       if (typeof window.showLoading === "function") {
         window.showLoading(String(message || "Running solver..."));
@@ -19040,6 +19771,24 @@ function initRouteSequencerControls() {
     if (typeof window.hideLoading === "function") {
       window.hideLoading();
     }
+  };
+
+  const refreshRouteSequencerSummaryPreview = () => {
+    summaryPreviewNode.innerHTML = renderRouteSequencerBenchmarkSummaryPreview(lastRouteSequencerPlans);
+    const count = Array.isArray(lastRouteSequencerPlans) ? lastRouteSequencerPlans.length : 0;
+    summaryPreviewStatus.textContent = count
+      ? `Showing RouteSmart-style summary for ${count.toLocaleString()} route/day group(s).`
+      : "Run Benchmark Existing Sequence or Auto Sequence to build a summary.";
+    summaryExportBtn.disabled = routeSequencerTaskRunning || !count;
+  };
+
+  const openRouteSequencerSummaryPreview = () => {
+    refreshRouteSequencerSummaryPreview();
+    summaryModal.style.display = "flex";
+  };
+
+  const closeRouteSequencerSummaryPreview = () => {
+    summaryModal.style.display = "none";
   };
 
   const setActiveSequenceResultRow = row => {
@@ -19467,7 +20216,14 @@ function initRouteSequencerControls() {
     populateRouteDayScopeSelector(settings);
     populateDepotSelectors(settings);
     populateCustomDumpSelector(settings);
+    lastRouteSequencerPlans = [];
+    viewSummaryBtn.disabled = true;
+    exportSummaryBtn.disabled = true;
+    summaryExportBtn.disabled = true;
+    summaryPreviewNode.innerHTML = "";
+    summaryPreviewStatus.textContent = "Run Benchmark Existing Sequence or Auto Sequence to build a summary.";
     renderRouteSequencerResultsList(resultsNode, []);
+    refreshOptimoRouteCredentialUi();
     setStatus("Ready.");
   };
 
@@ -19680,6 +20436,10 @@ function initRouteSequencerControls() {
   };
 
   const runEvaluateSequence = async () => {
+    lastRouteSequencerPlans = [];
+    viewSummaryBtn.disabled = true;
+    exportSummaryBtn.disabled = true;
+    summaryExportBtn.disabled = true;
     const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
     if (!rows.length || !Object.keys(routeDayGroups).length) {
       setStatus("Load a route file before evaluating sequence.", "error");
@@ -19864,6 +20624,11 @@ function initRouteSequencerControls() {
     const totalRouteMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalMinutes) || 0), 0);
 
     renderRouteSequencerResultsList(resultsNode, plans);
+    lastRouteSequencerPlans = plans.slice();
+    viewSummaryBtn.disabled = false;
+    exportSummaryBtn.disabled = false;
+    summaryExportBtn.disabled = false;
+    if (summaryModal.style.display === "flex") refreshRouteSequencerSummaryPreview();
     const skipNote = skippedRouteDayCount
       ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
       : "";
@@ -19883,6 +20648,10 @@ function initRouteSequencerControls() {
   };
 
   const runSequencer = async () => {
+    lastRouteSequencerPlans = [];
+    viewSummaryBtn.disabled = true;
+    exportSummaryBtn.disabled = true;
+    summaryExportBtn.disabled = true;
     const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
     if (!rows.length || !Object.keys(routeDayGroups).length) {
       setStatus("Load a route file before running Auto Sequence.", "error");
@@ -19955,7 +20724,7 @@ function initRouteSequencerControls() {
     const graphSummary = graph
       ? `${graph.nodeCount.toLocaleString()} nodes / ${graph.edgeCount.toLocaleString()} edges`
       : "No street graph";
-    setStatus(`Travel graph ready: ${graphSummary}. Gathering facilities...`);
+    setStatus(`Travel graph ready: ${graphSummary}. Gathering facilities and optimizing route order...`);
 
     let landfillPoints = [];
     if (dumpSource === "both" || dumpSource === "landfills") {
@@ -20050,6 +20819,11 @@ function initRouteSequencerControls() {
     const totalRouteMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalMinutes) || 0), 0);
 
     renderRouteSequencerResultsList(resultsNode, plans);
+    lastRouteSequencerPlans = plans.slice();
+    viewSummaryBtn.disabled = false;
+    exportSummaryBtn.disabled = false;
+    summaryExportBtn.disabled = false;
+    if (summaryModal.style.display === "flex") refreshRouteSequencerSummaryPreview();
     const skipNote = skippedRouteDayCount
       ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
       : "";
@@ -20057,7 +20831,7 @@ function initRouteSequencerControls() {
       ? ` ${networkBlockedRouteDayCount.toLocaleString()} route/day group(s) could not be connected on the street network and were skipped.`
       : "";
     setStatus(
-      `Auto Sequence complete: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote}${networkBlockedNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      `Auto Sequence complete with optimized heuristic: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote}${networkBlockedNote} Updated rows: ${updatedRows.toLocaleString()}.`,
       "success"
     );
   };
@@ -20074,6 +20848,31 @@ function initRouteSequencerControls() {
       });
     });
   }
+  optimoRouteKeyFileInput.addEventListener("change", async () => {
+    const file = optimoRouteKeyFileInput.files?.[0] || null;
+    if (!file) {
+      refreshOptimoRouteCredentialUi();
+      return;
+    }
+    setOptimoRouteStatus(`Reading ${file.name || "selected file"}...`);
+    try {
+      await readOptimoRouteApiKeyFile(file);
+      refreshOptimoRouteCredentialUi();
+      setStatus("OptimoRoute API key loaded for this browser session.", "success");
+    } catch (error) {
+      clearOptimoRouteSessionApiKey();
+      optimoRouteClearKeyBtn.disabled = true;
+      setOptimoRouteStatus(error?.message || "Unable to load OptimoRoute API key.", "error");
+      setStatus("OptimoRoute API key was not loaded.", "error");
+    } finally {
+      optimoRouteKeyFileInput.value = "";
+    }
+  });
+  optimoRouteClearKeyBtn.addEventListener("click", () => {
+    clearOptimoRouteSessionApiKey();
+    refreshOptimoRouteCredentialUi();
+    setStatus("Cleared the OptimoRoute API key from this session.");
+  });
   closeBtn.addEventListener("click", closeModal);
   modal.addEventListener("click", event => {
     if (event.target === modal) closeModal();
@@ -20207,6 +21006,36 @@ function initRouteSequencerControls() {
     }).finally(() => {
       setRouteSequencerLoading(false);
     });
+  });
+
+  exportSummaryBtn.addEventListener("click", () => {
+    if (routeSequencerTaskRunning) return;
+    exportRouteSequencerBenchmarkSummary(lastRouteSequencerPlans, { setStatus });
+  });
+
+  viewSummaryBtn.addEventListener("click", () => {
+    if (routeSequencerTaskRunning) return;
+    if (!lastRouteSequencerPlans.length) {
+      setStatus("Run Benchmark Existing Sequence or Auto Sequence before viewing a RouteSmart summary.", "error");
+      return;
+    }
+    openRouteSequencerSummaryPreview();
+  });
+
+  summaryExportBtn.addEventListener("click", () => {
+    if (routeSequencerTaskRunning) return;
+    exportRouteSequencerBenchmarkSummary(lastRouteSequencerPlans, { setStatus });
+  });
+
+  summaryCloseBtn.addEventListener("click", closeRouteSequencerSummaryPreview);
+  summaryCloseX.addEventListener("click", closeRouteSequencerSummaryPreview);
+  summaryModal.addEventListener("click", event => {
+    if (event.target === summaryModal) closeRouteSequencerSummaryPreview();
+  });
+  window.addEventListener("keydown", event => {
+    if (event.key === "Escape" && summaryModal.style.display === "flex") {
+      closeRouteSequencerSummaryPreview();
+    }
   });
 }
 
@@ -25160,7 +25989,7 @@ const refreshSelectionToolsUi = () => {
   if (selectionDrawModeSelect) selectionDrawModeSelect.value = mode;
   if (selectionTargetSelect) selectionTargetSelect.value = normalizeMapSelectionTarget(mapSelectionTarget);
   if (selectionModeBadge) selectionModeBadge.textContent = modeLabel;
-  setSelectionToolsStatus(`Target: ${targetLabel}. Mode: ${modeLabel}.`);
+  setSelectionToolsStatus(`Target: ${targetLabel}. Draw tools replace by default; hold Shift while drawing to add. Action mode: ${modeLabel}.`);
 };
 
 window.__refreshSelectionToolsUi = refreshSelectionToolsUi;
@@ -25202,9 +26031,8 @@ selectionDrawPolygonBtn?.addEventListener("click", () => {
     setSelectionToolsStatus("Unable to start polygon tool.");
     return;
   }
-  const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
   const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
-  setSelectionToolsStatus(`Polygon draw started (${modeLabel}, ${targetLabel}).`);
+  setSelectionToolsStatus(`Polygon draw started (${targetLabel}). Release to replace; hold Shift to add.`);
 });
 
 selectionDrawRectangleBtn?.addEventListener("click", () => {
@@ -25213,9 +26041,8 @@ selectionDrawRectangleBtn?.addEventListener("click", () => {
     setSelectionToolsStatus("Unable to start rectangle tool.");
     return;
   }
-  const modeLabel = getMapSelectionModeLabel(mapSelectionDrawMode);
   const targetLabel = getMapSelectionTargetLabel(mapSelectionTarget);
-  setSelectionToolsStatus(`Rectangle draw started (${modeLabel}, ${targetLabel}).`);
+  setSelectionToolsStatus(`Rectangle draw started (${targetLabel}). Release to replace; hold Shift to add.`);
 });
 
 selectionSelectInViewBtn?.addEventListener("click", () => {

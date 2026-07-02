@@ -3,3 +3,12 @@ tds-streets.sqlite
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite-journal
+
+# Local API keys / secrets (keep user-owned keys out of the repo)
+.env
+.env.*
+!.env.example
+*optimoroute*key*.txt
+*optimoroute*.key
+*optimo-route*key*.txt
+*optimo-route*.key
