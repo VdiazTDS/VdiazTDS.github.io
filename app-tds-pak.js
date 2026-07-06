@@ -35,6 +35,7 @@ const SUPABASE_KEY = "sb_publishable_Lfh2zlIiTSMB0U-Fe5o6Jg_mJ1qkznh";
 const BUCKET = "excel-files";
 const SHARED_FACILITIES_CLOUD_FILE = "__tds_pak_shared_facilities.xlsx";
 const SUMMARY_ATTACH_CLOUD_FILE = "__tds_pak_summary_attachments.json";
+const COLUMN_MAPPING_CLOUD_FILE = "__tds_pak_column_mappings.json";
 const SHARED_FACILITIES_SHEET_NAME = "Facilities";
 const SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS = 1200;
 const SUMMARY_ATTACH_CLOUD_SAVE_DEBOUNCE_MS = 700;
@@ -819,7 +820,8 @@ function isSystemCloudFileName(fileName) {
   const lower = String(fileName || "").trim().toLowerCase();
   return (
     lower === SHARED_FACILITIES_CLOUD_FILE.toLowerCase() ||
-    lower === SUMMARY_ATTACH_CLOUD_FILE.toLowerCase()
+    lower === SUMMARY_ATTACH_CLOUD_FILE.toLowerCase() ||
+    lower === COLUMN_MAPPING_CLOUD_FILE.toLowerCase()
   );
 }
 
@@ -10702,6 +10704,223 @@ function saveColumnMapping(headers, mapping) {
   }
 }
 
+const FILE_COLUMN_MAPPING_STORAGE_KEY = storageKey("fileColumnMappings");
+let fileColumnMappingsCache = null;
+let fileColumnMappingsInitPromise = null;
+let fileColumnMappingsCloudSaveTimer = null;
+let fileColumnMappingsCloudSaveInFlight = null;
+let fileColumnMappingsCloudSaveQueued = false;
+
+function normalizeSingleColumnMapping(mapping) {
+  const normalized = {};
+  if (!mapping || typeof mapping !== "object") return normalized;
+  COLUMN_MAPPING_FIELDS.forEach(field => {
+    const value = String(mapping[field.key] ?? "").trim();
+    if (value) normalized[field.key] = value;
+  });
+  return normalized;
+}
+
+function normalizeFileColumnMappingsMap(map) {
+  const normalized = {};
+  if (!map || typeof map !== "object") return normalized;
+
+  Object.entries(map).forEach(([fileName, mapping]) => {
+    const routeName = String(fileName ?? "").trim();
+    if (!routeName || isRouteSummaryFileName(routeName) || isSystemCloudFileName(routeName)) return;
+    const normalizedMapping = normalizeSingleColumnMapping(mapping);
+    if (!Object.keys(normalizedMapping).length) return;
+    normalized[routeName] = normalizedMapping;
+  });
+
+  return normalized;
+}
+
+function readFileColumnMappingsFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(FILE_COLUMN_MAPPING_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return normalizeFileColumnMappingsMap(parsed);
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeFileColumnMappingsToLocalStorage(map) {
+  localStorage.setItem(
+    FILE_COLUMN_MAPPING_STORAGE_KEY,
+    JSON.stringify(normalizeFileColumnMappingsMap(map))
+  );
+}
+
+function fileColumnMappingsEqual(a, b) {
+  const left = normalizeFileColumnMappingsMap(a);
+  const right = normalizeFileColumnMappingsMap(b);
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every(key => JSON.stringify(left[key]) === JSON.stringify(right[key]));
+}
+
+async function loadFileColumnMappingsFromCloud() {
+  const { data } = sb.storage.from(BUCKET).getPublicUrl(COLUMN_MAPPING_CLOUD_FILE);
+  const publicUrl = data?.publicUrl;
+  if (!publicUrl) return {};
+
+  const response = await fetch(publicUrl, { cache: "no-store" });
+  if (!response.ok) {
+    if (response.status === 404) return {};
+    if (response.status === 400) {
+      const text = (await response.text().catch(() => "")).toLowerCase();
+      if (text.includes("not found") || text.includes("no such object")) {
+        return {};
+      }
+    }
+    throw new Error(`Failed to load shared column mappings (HTTP ${response.status}).`);
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  return normalizeFileColumnMappingsMap(payload);
+}
+
+async function saveFileColumnMappingsToCloud(map) {
+  const payload = JSON.stringify(normalizeFileColumnMappingsMap(map), null, 2);
+  const blob = new Blob([payload], { type: "application/json" });
+  const { error } = await sb.storage
+    .from(BUCKET)
+    .upload(COLUMN_MAPPING_CLOUD_FILE, blob, {
+      upsert: true,
+      contentType: "application/json"
+    });
+
+  if (error) throw error;
+}
+
+function scheduleFileColumnMappingsCloudSave() {
+  if (fileColumnMappingsCloudSaveTimer) clearTimeout(fileColumnMappingsCloudSaveTimer);
+  fileColumnMappingsCloudSaveTimer = setTimeout(() => {
+    fileColumnMappingsCloudSaveTimer = null;
+    void flushFileColumnMappingsCloudSave();
+  }, 700);
+}
+
+async function flushFileColumnMappingsCloudSave() {
+  if (fileColumnMappingsCloudSaveInFlight) {
+    fileColumnMappingsCloudSaveQueued = true;
+    return fileColumnMappingsCloudSaveInFlight;
+  }
+
+  const mapToSave = normalizeFileColumnMappingsMap(
+    fileColumnMappingsCache || readFileColumnMappingsFromLocalStorage()
+  );
+
+  fileColumnMappingsCloudSaveInFlight = saveFileColumnMappingsToCloud(mapToSave)
+    .catch(error => {
+      console.warn("Unable to save shared column mappings:", error);
+    })
+    .finally(() => {
+      fileColumnMappingsCloudSaveInFlight = null;
+      if (fileColumnMappingsCloudSaveQueued) {
+        fileColumnMappingsCloudSaveQueued = false;
+        scheduleFileColumnMappingsCloudSave();
+      }
+    });
+
+  return fileColumnMappingsCloudSaveInFlight;
+}
+
+function flushFileColumnMappingsCloudSaveOnLifecycle(force = false) {
+  const hasLocalSnapshot = !!localStorage.getItem(FILE_COLUMN_MAPPING_STORAGE_KEY);
+  if (!force && !fileColumnMappingsCloudSaveTimer && !fileColumnMappingsCloudSaveQueued) return;
+  if (!hasLocalSnapshot && !fileColumnMappingsCache) return;
+  if (fileColumnMappingsCloudSaveTimer) {
+    clearTimeout(fileColumnMappingsCloudSaveTimer);
+    fileColumnMappingsCloudSaveTimer = null;
+  }
+  void flushFileColumnMappingsCloudSave();
+}
+
+async function ensureFileColumnMappingsInitialized() {
+  if (fileColumnMappingsCache) return fileColumnMappingsCache;
+  if (fileColumnMappingsInitPromise) return fileColumnMappingsInitPromise;
+
+  fileColumnMappingsInitPromise = (async () => {
+    const localMap = readFileColumnMappingsFromLocalStorage();
+    let cloudMap = {};
+
+    try {
+      cloudMap = await loadFileColumnMappingsFromCloud();
+    } catch (error) {
+      console.warn("Unable to load shared column mappings:", error);
+    }
+
+    const mergedMap = normalizeFileColumnMappingsMap({ ...localMap, ...cloudMap });
+    fileColumnMappingsCache = mergedMap;
+    writeFileColumnMappingsToLocalStorage(fileColumnMappingsCache);
+
+    if (!fileColumnMappingsEqual(mergedMap, cloudMap)) {
+      scheduleFileColumnMappingsCloudSave();
+    }
+
+    return fileColumnMappingsCache;
+  })().finally(() => {
+    fileColumnMappingsInitPromise = null;
+  });
+
+  return fileColumnMappingsInitPromise;
+}
+
+function getFileColumnMappings() {
+  const map = fileColumnMappingsCache || readFileColumnMappingsFromLocalStorage();
+  return normalizeFileColumnMappingsMap(map);
+}
+
+function setFileColumnMappings(map) {
+  fileColumnMappingsCache = normalizeFileColumnMappingsMap(map);
+  writeFileColumnMappingsToLocalStorage(fileColumnMappingsCache);
+  scheduleFileColumnMappingsCloudSave();
+}
+
+function getSavedColumnMappingForFile(fileName) {
+  const routeName = String(fileName ?? "").trim();
+  if (!routeName) return {};
+  const map = getFileColumnMappings();
+  return normalizeSingleColumnMapping(map[routeName]);
+}
+
+function setSavedColumnMappingForFile(fileName, mapping) {
+  const routeName = String(fileName ?? "").trim();
+  if (!routeName) return;
+  const normalizedMapping = normalizeSingleColumnMapping(mapping);
+  const map = getFileColumnMappings();
+  if (Object.keys(normalizedMapping).length) {
+    map[routeName] = normalizedMapping;
+  } else {
+    delete map[routeName];
+  }
+  setFileColumnMappings(map);
+}
+
+function removeSavedColumnMappingForFile(fileName) {
+  const routeName = String(fileName ?? "").trim();
+  if (!routeName) return;
+  const map = getFileColumnMappings();
+  if (!Object.prototype.hasOwnProperty.call(map, routeName)) return;
+  delete map[routeName];
+  setFileColumnMappings(map);
+}
+
+function collectColumnMappingHeaders(rows, sampleLimit = 25) {
+  const list = Array.isArray(rows) ? rows : [];
+  const headerSet = new Set();
+  list.slice(0, Math.min(list.length, sampleLimit)).forEach(row => {
+    Object.keys(row || {}).forEach(key => {
+      if (key) headerSet.add(key);
+    });
+  });
+  return [...headerSet];
+}
+
 function buildColumnMappingGuess(headers) {
   const normalizedHeaders = headers.map(h => ({
     raw: h,
@@ -10738,6 +10957,23 @@ function buildColumnMappingGuess(headers) {
   });
 
   return mapping;
+}
+
+function buildInitialColumnMapping(headers, fileName = "") {
+  const guess = buildColumnMappingGuess(headers);
+  const savedForFile = getSavedColumnMappingForFile(fileName);
+  const saved = loadSavedColumnMapping(headers) || {};
+  const initial = {};
+  COLUMN_MAPPING_FIELDS.forEach(field => {
+    const fileValue = savedForFile[field.key];
+    const savedValue = saved[field.key];
+    if (headers.includes(fileValue)) {
+      initial[field.key] = fileValue;
+      return;
+    }
+    initial[field.key] = headers.includes(savedValue) ? savedValue : (guess[field.key] || "");
+  });
+  return initial;
 }
 
 function ensureColumnMappingModal() {
@@ -10855,13 +11091,19 @@ function openColumnMappingPrompt(headers, initialMapping, fileName, sampleByHead
       collapseSelect();
       if (window.innerWidth > 900) {
         select.addEventListener("mousedown", e => {
-          // Keep the list attached to the field so it remains scrollable in-page.
+          // Only intercept the first click so expanded option clicks still select normally.
+          if (select.dataset.expanded === "1") return;
           e.preventDefault();
-          if (select.dataset.expanded === "1") collapseSelect();
-          else expandSelect();
+          expandSelect();
           select.focus();
         });
       }
+      select.addEventListener("keydown", e => {
+        if (e.key === "Escape") {
+          collapseSelect();
+          select.blur();
+        }
+      });
       select.addEventListener("blur", collapseSelect);
 
       const sample = document.createElement("span");
@@ -10949,11 +11191,16 @@ function applyColumnAliasesToRows(rows, mapping) {
       const targetKey = field.key;
       const sourceKey = mapping[targetKey];
       if (!sourceKey || sourceKey === targetKey) return;
-      if (Object.prototype.hasOwnProperty.call(row, targetKey)) return;
+      if (Object.prototype.hasOwnProperty.call(row, targetKey)) {
+        if (isBlankRecordFieldValue(row[targetKey]) && !isBlankRecordFieldValue(row[sourceKey])) {
+          row[targetKey] = row[sourceKey];
+        }
+        return;
+      }
 
       Object.defineProperty(row, targetKey, {
         configurable: true,
-        enumerable: false,
+        enumerable: true,
         get() {
           return row[sourceKey];
         },
@@ -11064,15 +11311,18 @@ function flushWorkbookCloudSaveOnLifecycle(force = false) {
 window.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
     flushWorkbookCloudSaveOnLifecycle(true);
+    flushFileColumnMappingsCloudSaveOnLifecycle(true);
     flushSharedFacilitiesCloudSaveOnLifecycle(true);
   }
 });
 window.addEventListener("pagehide", () => {
   flushWorkbookCloudSaveOnLifecycle(true);
+  flushFileColumnMappingsCloudSaveOnLifecycle(true);
   flushSharedFacilitiesCloudSaveOnLifecycle(true);
 });
 window.addEventListener("beforeunload", () => {
   flushWorkbookCloudSaveOnLifecycle(true);
+  flushFileColumnMappingsCloudSaveOnLifecycle(true);
   flushSharedFacilitiesCloudSaveOnLifecycle(true);
 });
 
@@ -24575,26 +24825,15 @@ function openAttributeTablePopout() {
   });
 }
 async function prepareMappedWorkbookForUpload(buffer, fileName) {
+  await ensureFileColumnMappingsInitialized();
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
   if (!rows.length) return { wb, rows };
 
-  const headerSet = new Set();
-  rows.slice(0, Math.min(rows.length, 25)).forEach(row => {
-    Object.keys(row || {}).forEach(k => {
-      if (k) headerSet.add(k);
-    });
-  });
-  const headers = [...headerSet];
-  const guess = buildColumnMappingGuess(headers);
-  const saved = loadSavedColumnMapping(headers) || {};
-  const initial = {};
-  COLUMN_MAPPING_FIELDS.forEach(field => {
-    const savedValue = saved[field.key];
-    initial[field.key] = headers.includes(savedValue) ? savedValue : (guess[field.key] || "");
-  });
+  const headers = collectColumnMappingHeaders(rows);
+  const initial = buildInitialColumnMapping(headers, fileName);
   const sampleByHeader = {};
   headers.forEach(h => {
     const row = rows.find(r => String(r?.[h] ?? "").trim() !== "");
@@ -24605,7 +24844,7 @@ async function prepareMappedWorkbookForUpload(buffer, fileName) {
   if (!mapping) return null;
 
   applyColumnAliasesToRows(rows, mapping);
-  return { wb, rows };
+  return { wb, rows, mapping, headers };
 }
 
 // ================= PROCESS ROUTE EXCEL =================
@@ -24613,7 +24852,14 @@ function processExcelBuffer(buffer, preMappedRows = null, preMappedWorkbook = nu
   const wb = preMappedWorkbook || XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
 
-  const rows = preMappedRows || XLSX.utils.sheet_to_json(ws);
+  const rows = preMappedRows || XLSX.utils.sheet_to_json(ws, { defval: "" });
+  const detectedHeaders = collectColumnMappingHeaders(rows);
+  if (detectedHeaders.length) {
+    applyColumnAliasesToRows(
+      rows,
+      buildInitialColumnMapping(detectedHeaders, String(window._currentFilePath || "").trim())
+    );
+  }
   const canonicalFieldsSynced = ensureCanonicalRecordFields(rows);
   const serviceTimeFieldAdded = ensureServiceTimeField(rows);
   const backupColumnsAdded = ensureExistBackupColumns(rows);
@@ -24770,6 +25016,7 @@ async function openRouteFileFromCloud(routeName, options = {}) {
 
   try {
     showLoading(loadingMessage);
+    await ensureFileColumnMappingsInitialized();
 
     const { data } = sb.storage.from(BUCKET).getPublicUrl(name);
     const urlWithBypass = data.publicUrl + "?v=" + Date.now();
@@ -25070,6 +25317,7 @@ async function listFiles() {
 
       await sb.storage.from(BUCKET).remove(toDelete);
       removeRouteSummaryAttachment(routeName);
+      removeSavedColumnMappingForFile(routeName);
       if (summaryName) {
         const map = getSummaryAttachments();
         Object.keys(map).forEach(routeKey => {
@@ -25240,6 +25488,14 @@ async function uploadFile(file) {
     setCurrentFileDisplay(window._currentFilePath);
 
     processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
+    if (mappedWorkbook.mapping) {
+      setSavedColumnMappingForFile(file.name, mappedWorkbook.mapping);
+      await flushFileColumnMappingsCloudSave();
+    }
+    const mappedWorkbookSaved = await saveWorkbookToCloud();
+    if (!mappedWorkbookSaved) {
+      throw new Error("Mapped workbook cloud save failed.");
+    }
     listFiles();
 
     hideLoading("Upload Complete \u2705");
