@@ -11668,7 +11668,7 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
 
 .saved-files-list .saved-route-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   align-items: center;
   gap: 6px;
   justify-content: stretch;
@@ -11714,6 +11714,11 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
 .saved-files-list .saved-route-actions .summary-btn {
   border-color: #53b17d;
   background: linear-gradient(160deg, #2c7a53 0%, #205e3f 100%);
+}
+
+.saved-files-list .saved-route-actions .link-btn {
+  border-color: #8e7be0;
+  background: linear-gradient(160deg, #5f4db3 0%, #47388f 100%);
 }
 
 .saved-files-list .saved-route-actions .edit-btn {
@@ -11812,6 +11817,11 @@ body.sun-mode .saved-files-list .saved-route-actions .summary-btn {
   background: linear-gradient(160deg, #edf8f1 0%, #deefe4 100%) !important;
 }
 
+body.sun-mode .saved-files-list .saved-route-actions .link-btn {
+  border-color: #b4a6ef !important;
+  background: linear-gradient(160deg, #f4f0ff 0%, #e9e1ff 100%) !important;
+}
+
 body.sun-mode .saved-files-list .saved-route-actions .edit-btn {
   border-color: #d5b07d !important;
   background: linear-gradient(160deg, #fff6ea 0%, #f7ead8 100%) !important;
@@ -11834,7 +11844,7 @@ body.sun-mode .saved-files-list .saved-route-actions .delete-btn {
 
   .saved-files-list .saved-route-actions {
     width: 100%;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   }
 
   .saved-files-list .saved-route-actions.has-edit {

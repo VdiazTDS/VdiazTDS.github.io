@@ -37,6 +37,10 @@ const SHARED_FACILITIES_CLOUD_FILE = "__tds_pak_shared_facilities.xlsx";
 const SUMMARY_ATTACH_CLOUD_FILE = "__tds_pak_summary_attachments.json";
 const MANUAL_SUMMARY_FILES_CLOUD_FILE = "__tds_pak_manual_summary_files.json";
 const COLUMN_MAPPING_CLOUD_FILE = "__tds_pak_column_mappings.json";
+const SHARED_SAVED_FILE_PARAM = "sharedFile";
+const SHARED_SAVED_FILE_TYPE_PARAM = "sharedType";
+const TDS_PAK_PUBLIC_SHARE_URL = "https://vdiaztds.github.io/tds-pak.html";
+const TDS_PAK_SHARE_LINK_CACHE_BUSTER = "20260706-05";
 const SHARED_FACILITIES_SHEET_NAME = "Facilities";
 const SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS = 1200;
 const SUMMARY_ATTACH_CLOUD_SAVE_DEBOUNCE_MS = 700;
@@ -55,6 +59,7 @@ let sharedFacilitiesAutoSaveTimer = null;
 let sharedFacilitiesAutoSaveInFlight = null;
 let sharedFacilitiesAutoSavePendingReasons = [];
 let sharedFacilitiesCloudInitPromise = null;
+let sharedSavedFileRequestHandled = false;
 
 window.streetLabelsEnabled = false;
 const attributeRowToId = new WeakMap();
@@ -236,10 +241,22 @@ function buildAppDiagnosticsReport() {
 
 async function copyAppDiagnosticsToClipboard() {
   const report = buildAppDiagnosticsReport();
+  const copied = await copyTextWithPromptFallback(report, "Copy diagnostics text below:");
+  if (copied) {
+    alert("Diagnostics copied. Paste and send this text.");
+    return true;
+  }
+  return false;
+}
+
+async function copyTextWithPromptFallback(text, promptMessage = "Copy text below:") {
+  const value = String(text ?? "");
+  if (!value) return false;
+
   let copied = false;
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(report);
+      await navigator.clipboard.writeText(value);
       copied = true;
     }
   } catch {
@@ -249,7 +266,7 @@ async function copyAppDiagnosticsToClipboard() {
   if (!copied) {
     try {
       const node = document.createElement("textarea");
-      node.value = report;
+      node.value = value;
       node.setAttribute("readonly", "readonly");
       node.style.position = "fixed";
       node.style.opacity = "0";
@@ -264,13 +281,121 @@ async function copyAppDiagnosticsToClipboard() {
     }
   }
 
-  if (copied) {
-    alert("Diagnostics copied. Paste and send this text.");
-    return true;
+  if (!copied) {
+    window.prompt(promptMessage, value);
+    return false;
   }
 
-  window.prompt("Copy diagnostics text below:", report);
-  return false;
+  return true;
+}
+
+function normalizeSharedSavedFileType(fileType) {
+  return String(fileType || "").trim().toLowerCase() === "summary" ? "summary" : "route";
+}
+
+function getTdsPakShareBaseUrl() {
+  try {
+    const currentUrl = new URL(window.location.href);
+    const hostname = String(currentUrl.hostname || "").toLowerCase();
+    const pageName = String(currentUrl.pathname || "").split("/").pop() || "";
+    const isLocalUrl =
+      currentUrl.protocol === "file:" ||
+      hostname === "localhost" ||
+      hostname === "127.0.0.1";
+
+    if (/^tds-pak\.html$/i.test(pageName) && isLocalUrl) {
+      return TDS_PAK_PUBLIC_SHARE_URL;
+    }
+
+    currentUrl.search = "";
+    currentUrl.hash = "";
+    return currentUrl.toString();
+  } catch (_) {
+    return TDS_PAK_PUBLIC_SHARE_URL;
+  }
+}
+
+function buildSavedFileShareUrl(fileName, fileType = "route") {
+  const name = String(fileName || "").trim();
+  if (!name) return "";
+
+  const url = new URL(getTdsPakShareBaseUrl());
+  url.searchParams.set("_cb", TDS_PAK_SHARE_LINK_CACHE_BUSTER);
+  url.searchParams.set(SHARED_SAVED_FILE_PARAM, name);
+  url.searchParams.set(SHARED_SAVED_FILE_TYPE_PARAM, normalizeSharedSavedFileType(fileType));
+  return url.toString();
+}
+
+async function copySavedFileShareUrl(fileName, fileType = "route", successLabel = "Link") {
+  const shareUrl = buildSavedFileShareUrl(fileName, fileType);
+  if (!shareUrl) return false;
+
+  const copied = await copyTextWithPromptFallback(shareUrl, "Copy share link below:");
+  if (copied) {
+    alert(`${successLabel} copied. Send it to open this saved file in TDS Pak.`);
+  }
+  return copied;
+}
+
+function getSharedSavedFileRequestFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    const fileName = String(url.searchParams.get(SHARED_SAVED_FILE_PARAM) || "").trim();
+    if (!fileName) return null;
+
+    return {
+      fileName,
+      fileType: normalizeSharedSavedFileType(url.searchParams.get(SHARED_SAVED_FILE_TYPE_PARAM))
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function openSavedFileFromShareRequest() {
+  const request = getSharedSavedFileRequestFromUrl();
+  if (!request) return false;
+  if (sharedSavedFileRequestHandled) return false;
+  sharedSavedFileRequestHandled = true;
+
+  const { fileName, fileType } = request;
+  const fileLabel = fileType === "summary" ? "summary file" : "route file";
+
+  try {
+    if (fileType === "summary") {
+      showLoading("Opening shared summary...");
+      await loadSummaryFileFromCloud(fileName);
+      hideLoading("Shared summary loaded.");
+      return true;
+    }
+
+    return await openRouteFileFromCloud(fileName, {
+      loadingMessage: "Opening shared route file...",
+      successMessage: "Shared route file loaded.",
+      errorMessage: "Could not open the shared route file.",
+      closeManager: true,
+      loadSummary: true
+    });
+  } catch (error) {
+    console.error("SHARED SAVED FILE OPEN ERROR:", error);
+    hideLoading();
+    alert(`Could not open the shared ${fileLabel}.`);
+    return false;
+  }
+}
+
+async function initializeSavedFilesOnStartup() {
+  try {
+    await listFiles();
+  } catch (error) {
+    console.warn("Saved files list failed during startup:", error);
+  }
+
+  try {
+    await openSavedFileFromShareRequest();
+  } catch (error) {
+    console.error("Shared saved-file startup open failed:", error);
+  }
 }
 
 (function patchConsoleForDiagnostics() {
@@ -25266,8 +25391,8 @@ async function openRouteFileFromCloud(routeName, options = {}) {
   }
 }
 
-async function routeFileExistsInCloud(routeName) {
-  const name = String(routeName || "").trim();
+async function cloudFileExistsInStorage(fileName) {
+  const name = String(fileName || "").trim();
   if (!name) return false;
   const { data, error } = await sb.storage.from(BUCKET).list();
   if (error) throw error;
@@ -25523,6 +25648,14 @@ async function listFiles() {
     };
     actions.appendChild(openBtn);
 
+    const routeLinkBtn = document.createElement("button");
+    routeLinkBtn.className = "saved-file-btn link-btn";
+    routeLinkBtn.textContent = "Map Link";
+    routeLinkBtn.onclick = async () => {
+      await copySavedFileShareUrl(routeName, "route", "Map link");
+    };
+    actions.appendChild(routeLinkBtn);
+
     if (summaryName) {
       const summaryBtn = document.createElement("button");
       summaryBtn.className = "saved-file-btn summary-btn";
@@ -25532,6 +25665,14 @@ async function listFiles() {
         if (fileManagerModal) fileManagerModal.style.display = "none";
       };
       actions.appendChild(summaryBtn);
+
+      const summaryLinkBtn = document.createElement("button");
+      summaryLinkBtn.className = "saved-file-btn link-btn";
+      summaryLinkBtn.textContent = "Summary Link";
+      summaryLinkBtn.onclick = async () => {
+        await copySavedFileShareUrl(summaryName, "summary", "Summary link");
+      };
+      actions.appendChild(summaryLinkBtn);
     } else {
       const editBtn = document.createElement("button");
       editBtn.className = "saved-file-btn edit-btn";
@@ -25641,6 +25782,14 @@ async function listFiles() {
     };
     actions.appendChild(openSummaryBtn);
 
+    const summaryLinkBtn = document.createElement("button");
+    summaryLinkBtn.className = "saved-file-btn link-btn";
+    summaryLinkBtn.textContent = "Summary Link";
+    summaryLinkBtn.onclick = async () => {
+      await copySavedFileShareUrl(summaryName, "summary", "Summary link");
+    };
+    actions.appendChild(summaryLinkBtn);
+
     const attachBtn = document.createElement("button");
     attachBtn.className = "saved-file-btn open-btn";
     attachBtn.textContent = "Attach";
@@ -25728,7 +25877,7 @@ async function uploadFile(file) {
   try {
     let existingInCloud = false;
     try {
-      existingInCloud = await routeFileExistsInCloud(file.name);
+      existingInCloud = await cloudFileExistsInStorage(file.name);
     } catch (listError) {
       console.warn("Unable to verify existing cloud file before upload:", listError);
     }
@@ -29560,9 +29709,7 @@ if (routesToggle && routesContent) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-  listFiles();
+  void initializeSavedFilesOnStartup();
 }
 
 
