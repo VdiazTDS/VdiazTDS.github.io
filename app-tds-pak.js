@@ -35,6 +35,7 @@ const SUPABASE_KEY = "sb_publishable_Lfh2zlIiTSMB0U-Fe5o6Jg_mJ1qkznh";
 const BUCKET = "excel-files";
 const SHARED_FACILITIES_CLOUD_FILE = "__tds_pak_shared_facilities.xlsx";
 const SUMMARY_ATTACH_CLOUD_FILE = "__tds_pak_summary_attachments.json";
+const MANUAL_SUMMARY_FILES_CLOUD_FILE = "__tds_pak_manual_summary_files.json";
 const COLUMN_MAPPING_CLOUD_FILE = "__tds_pak_column_mappings.json";
 const SHARED_FACILITIES_SHEET_NAME = "Facilities";
 const SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS = 1200;
@@ -821,16 +822,28 @@ function isSystemCloudFileName(fileName) {
   return (
     lower === SHARED_FACILITIES_CLOUD_FILE.toLowerCase() ||
     lower === SUMMARY_ATTACH_CLOUD_FILE.toLowerCase() ||
+    lower === MANUAL_SUMMARY_FILES_CLOUD_FILE.toLowerCase() ||
     lower === COLUMN_MAPPING_CLOUD_FILE.toLowerCase()
   );
 }
 
 const SUMMARY_ATTACH_STORAGE_KEY = storageKey("summaryAttachments");
+const DETACHED_SUMMARY_PREFIX = "__DETACHED__|";
 let summaryAttachmentsCache = null;
 let summaryAttachmentsInitPromise = null;
 let summaryAttachmentsCloudSaveTimer = null;
 let summaryAttachmentsCloudSaveInFlight = null;
 let summaryAttachmentsCloudSaveQueued = false;
+
+function buildDetachedSummaryMarker(summaryFileName) {
+  return `${DETACHED_SUMMARY_PREFIX}${String(summaryFileName ?? "").trim()}`;
+}
+
+function parseDetachedSummaryMarker(value) {
+  const text = String(value ?? "").trim();
+  if (!text.startsWith(DETACHED_SUMMARY_PREFIX)) return "";
+  return text.slice(DETACHED_SUMMARY_PREFIX.length).trim();
+}
 
 function normalizeSummaryAttachmentsMap(map) {
   const normalized = {};
@@ -838,9 +851,10 @@ function normalizeSummaryAttachmentsMap(map) {
 
   Object.entries(map).forEach(([routeName, summaryName]) => {
     const route = String(routeName ?? "").trim();
-    const summary = String(summaryName ?? "").trim();
+    const detachedSummary = parseDetachedSummaryMarker(summaryName);
+    const summary = detachedSummary || String(summaryName ?? "").trim();
     if (!route || !summary) return;
-    normalized[route] = summary;
+    normalized[route] = detachedSummary ? buildDetachedSummaryMarker(detachedSummary) : summary;
   });
 
   return normalized;
@@ -986,10 +1000,20 @@ function setSummaryAttachments(map) {
 
 function setRouteSummaryAttachment(routeFileName, summaryFileName) {
   const map = getSummaryAttachments();
+  const detachedMarker = buildDetachedSummaryMarker(summaryFileName);
   Object.keys(map).forEach(routeKey => {
-    if (map[routeKey] === summaryFileName) delete map[routeKey];
+    if (map[routeKey] === summaryFileName || map[routeKey] === detachedMarker) delete map[routeKey];
   });
   map[routeFileName] = summaryFileName;
+  setSummaryAttachments(map);
+}
+
+function detachRouteSummaryAttachment(routeFileName, summaryFileName) {
+  const route = String(routeFileName ?? "").trim();
+  const summary = String(summaryFileName ?? "").trim();
+  if (!route || !summary) return;
+  const map = getSummaryAttachments();
+  map[route] = buildDetachedSummaryMarker(summary);
   setSummaryAttachments(map);
 }
 
@@ -1005,7 +1029,9 @@ function cleanupSummaryAttachments(existingFileNames) {
   let dirty = false;
 
   Object.entries(map).forEach(([routeName, summaryName]) => {
-    if (!existing.has(routeName) || !existing.has(summaryName)) {
+    const detachedSummary = parseDetachedSummaryMarker(summaryName);
+    const resolvedSummaryName = detachedSummary || summaryName;
+    if (!existing.has(routeName) || !existing.has(resolvedSummaryName)) {
       delete map[routeName];
       dirty = true;
     }
@@ -1015,10 +1041,206 @@ function cleanupSummaryAttachments(existingFileNames) {
   return map;
 }
 
+const MANUAL_SUMMARY_FILES_STORAGE_KEY = storageKey("manualSummaryFiles");
+let manualSummaryFilesCache = null;
+let manualSummaryFilesInitPromise = null;
+let manualSummaryFilesCloudSaveTimer = null;
+let manualSummaryFilesCloudSaveInFlight = null;
+let manualSummaryFilesCloudSaveQueued = false;
+
+function normalizeManualSummaryFiles(fileNames) {
+  const seen = new Set();
+  const normalized = [];
+  (Array.isArray(fileNames) ? fileNames : []).forEach(fileName => {
+    const name = String(fileName ?? "").trim();
+    if (!name || isSystemCloudFileName(name) || seen.has(name)) return;
+    seen.add(name);
+    normalized.push(name);
+  });
+  return normalized;
+}
+
+function readManualSummaryFilesFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(MANUAL_SUMMARY_FILES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return normalizeManualSummaryFiles(parsed);
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeManualSummaryFilesToLocalStorage(fileNames) {
+  localStorage.setItem(
+    MANUAL_SUMMARY_FILES_STORAGE_KEY,
+    JSON.stringify(normalizeManualSummaryFiles(fileNames))
+  );
+}
+
+function manualSummaryFilesEqual(a, b) {
+  const left = normalizeManualSummaryFiles(a).slice().sort((x, y) => x.localeCompare(y, undefined, { sensitivity: "base", numeric: true }));
+  const right = normalizeManualSummaryFiles(b).slice().sort((x, y) => x.localeCompare(y, undefined, { sensitivity: "base", numeric: true }));
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+async function loadManualSummaryFilesFromCloud() {
+  const { data } = sb.storage.from(BUCKET).getPublicUrl(MANUAL_SUMMARY_FILES_CLOUD_FILE);
+  const publicUrl = data?.publicUrl;
+  if (!publicUrl) return [];
+
+  const response = await fetch(publicUrl, { cache: "no-store" });
+  if (!response.ok) {
+    if (response.status === 404) return [];
+    if (response.status === 400) {
+      const text = (await response.text().catch(() => "")).toLowerCase();
+      if (text.includes("not found") || text.includes("no such object")) {
+        return [];
+      }
+    }
+    throw new Error(`Failed to load manual summary files (HTTP ${response.status}).`);
+  }
+
+  const payload = await response.json().catch(() => []);
+  return normalizeManualSummaryFiles(payload);
+}
+
+async function saveManualSummaryFilesToCloud(fileNames) {
+  const payload = JSON.stringify(normalizeManualSummaryFiles(fileNames), null, 2);
+  const blob = new Blob([payload], { type: "application/json" });
+  const { error } = await sb.storage
+    .from(BUCKET)
+    .upload(MANUAL_SUMMARY_FILES_CLOUD_FILE, blob, {
+      upsert: true,
+      contentType: "application/json"
+    });
+
+  if (error) throw error;
+}
+
+function scheduleManualSummaryFilesCloudSave() {
+  if (manualSummaryFilesCloudSaveTimer) clearTimeout(manualSummaryFilesCloudSaveTimer);
+  manualSummaryFilesCloudSaveTimer = setTimeout(() => {
+    manualSummaryFilesCloudSaveTimer = null;
+    void flushManualSummaryFilesCloudSave();
+  }, 700);
+}
+
+async function flushManualSummaryFilesCloudSave() {
+  if (manualSummaryFilesCloudSaveInFlight) {
+    manualSummaryFilesCloudSaveQueued = true;
+    return manualSummaryFilesCloudSaveInFlight;
+  }
+
+  const listToSave = normalizeManualSummaryFiles(
+    manualSummaryFilesCache || readManualSummaryFilesFromLocalStorage()
+  );
+
+  manualSummaryFilesCloudSaveInFlight = saveManualSummaryFilesToCloud(listToSave)
+    .catch(error => {
+      console.warn("Unable to save manual summary files:", error);
+    })
+    .finally(() => {
+      manualSummaryFilesCloudSaveInFlight = null;
+      if (manualSummaryFilesCloudSaveQueued) {
+        manualSummaryFilesCloudSaveQueued = false;
+        scheduleManualSummaryFilesCloudSave();
+      }
+    });
+
+  return manualSummaryFilesCloudSaveInFlight;
+}
+
+function getManualSummaryFiles() {
+  return normalizeManualSummaryFiles(
+    manualSummaryFilesCache || readManualSummaryFilesFromLocalStorage()
+  );
+}
+
+function setManualSummaryFiles(fileNames) {
+  manualSummaryFilesCache = normalizeManualSummaryFiles(fileNames);
+  writeManualSummaryFilesToLocalStorage(manualSummaryFilesCache);
+  scheduleManualSummaryFilesCloudSave();
+}
+
+async function ensureManualSummaryFilesInitialized() {
+  if (manualSummaryFilesCache) return manualSummaryFilesCache;
+  if (manualSummaryFilesInitPromise) return manualSummaryFilesInitPromise;
+
+  manualSummaryFilesInitPromise = (async () => {
+    const localFiles = readManualSummaryFilesFromLocalStorage();
+    let cloudFiles = [];
+
+    try {
+      cloudFiles = await loadManualSummaryFilesFromCloud();
+    } catch (error) {
+      console.warn("Unable to load manual summary files:", error);
+    }
+
+    const merged = normalizeManualSummaryFiles([...localFiles, ...cloudFiles]);
+    const attachmentMap = getSummaryAttachments();
+    let attachmentMapChanged = false;
+
+    Object.entries(attachmentMap).forEach(([routeName, summaryName]) => {
+      const detachedSummary = parseDetachedSummaryMarker(summaryName);
+      if (!detachedSummary) return;
+      merged.push(detachedSummary);
+      delete attachmentMap[routeName];
+      attachmentMapChanged = true;
+    });
+
+    manualSummaryFilesCache = normalizeManualSummaryFiles(merged);
+    writeManualSummaryFilesToLocalStorage(manualSummaryFilesCache);
+
+    if (!manualSummaryFilesEqual(manualSummaryFilesCache, cloudFiles)) {
+      scheduleManualSummaryFilesCloudSave();
+    }
+    if (attachmentMapChanged) {
+      setSummaryAttachments(attachmentMap);
+    }
+
+    return manualSummaryFilesCache;
+  })().finally(() => {
+    manualSummaryFilesInitPromise = null;
+  });
+
+  return manualSummaryFilesInitPromise;
+}
+
+function cleanupManualSummaryFiles(existingFileNames = []) {
+  const existing = new Set(existingFileNames || []);
+  const cleaned = getManualSummaryFiles().filter(fileName => existing.has(fileName));
+  if (!manualSummaryFilesEqual(cleaned, getManualSummaryFiles())) {
+    setManualSummaryFiles(cleaned);
+  }
+  return new Set(cleaned);
+}
+
+function addManualSummaryFile(fileName) {
+  const name = String(fileName ?? "").trim();
+  if (!name) return;
+  const next = getManualSummaryFiles();
+  if (next.includes(name)) return;
+  next.push(name);
+  setManualSummaryFiles(next);
+}
+
+function removeManualSummaryFile(fileName) {
+  const name = String(fileName ?? "").trim();
+  if (!name) return;
+  const next = getManualSummaryFiles().filter(item => item !== name);
+  setManualSummaryFiles(next);
+}
+
 function resolveSummaryForRoute(routeFileName, filesList) {
   const fileNames = (filesList || []).map(f => f.name);
   const attachmentMap = cleanupSummaryAttachments(fileNames);
   const attachedSummary = attachmentMap[routeFileName];
+  const detachedSummary = parseDetachedSummaryMarker(attachedSummary);
+
+  if (detachedSummary) {
+    return null;
+  }
 
   if (attachedSummary && fileNames.includes(attachedSummary)) {
     return attachedSummary;
@@ -25135,50 +25357,84 @@ async function listFiles() {
   const { data, error } = await sb.storage.from(BUCKET).list();
   if (error) return console.error(error);
 
-  const ul = document.getElementById("savedFiles");
-  if (!ul) return;
+  const routeList = document.getElementById("savedFiles");
+  const unattachedSummaryList = document.getElementById("savedFilesDetachedSummaries");
+  if (!routeList || !unattachedSummaryList) return;
 
   try {
     await ensureSummaryAttachmentsInitialized();
+    await ensureManualSummaryFilesInitialized();
   } catch (error) {
-    console.warn("Summary attachment sync init failed before rendering saved files:", error);
+    console.warn("Saved file metadata init failed before rendering saved files:", error);
   }
 
-  ul.innerHTML = "";
+  routeList.innerHTML = "";
+  unattachedSummaryList.innerHTML = "";
   const cloudFiles = Array.isArray(data) ? data : [];
-  const routeFiles = cloudFiles.filter(file => !isRouteSummaryFileName(file.name) && !isSystemCloudFileName(file.name));
-  const summaryFiles = cloudFiles.filter(file => isRouteSummaryFileName(file.name) && !isSystemCloudFileName(file.name));
   const allFileNames = cloudFiles.map(f => f.name);
   cleanupSummaryAttachments(allFileNames);
+  const manualSummaryFileNames = cleanupManualSummaryFiles(allFileNames);
+  const attachedSummaryFileNames = new Set(
+    Object.values(getSummaryAttachments())
+      .map(value => parseDetachedSummaryMarker(value) ? "" : String(value ?? "").trim())
+      .filter(Boolean)
+  );
+  const routeFiles = cloudFiles.filter(file =>
+    !isSystemCloudFileName(file.name) &&
+    !isRouteSummaryFileName(file.name) &&
+    !manualSummaryFileNames.has(file.name) &&
+    !attachedSummaryFileNames.has(file.name)
+  );
+  const summaryFiles = cloudFiles.filter(file =>
+    !isSystemCloudFileName(file.name) &&
+    (isRouteSummaryFileName(file.name) || manualSummaryFileNames.has(file.name) || attachedSummaryFileNames.has(file.name))
+  );
   const sortSelect = document.getElementById("savedFilesSortSelect");
   const storedSortMode = normalizeSavedFilesSortMode(storageGet(SAVED_FILES_SORT_MODE_KEY));
   const activeSortMode = normalizeSavedFilesSortMode(sortSelect?.value || storedSortMode);
   if (sortSelect) sortSelect.value = activeSortMode;
   storageSet(SAVED_FILES_SORT_MODE_KEY, activeSortMode);
 
-  const routeEntries = routeFiles
-    .map(file => {
-      const routeName = file.name;
-      const summaryName = resolveSummaryForRoute(routeName, data);
-      const addedTimestamp = getSavedFileAddedTimestamp(file);
-      return { routeName, summaryName, addedTimestamp };
-    })
-    .sort((a, b) => {
-      if (activeSortMode === "date-desc") {
-        const delta = b.addedTimestamp - a.addedTimestamp;
-        if (delta !== 0) return delta;
-        return a.routeName.localeCompare(b.routeName, undefined, { numeric: true, sensitivity: "base" });
-      }
-      if (activeSortMode === "date-asc") {
-        const delta = a.addedTimestamp - b.addedTimestamp;
-        if (delta !== 0) return delta;
-        return a.routeName.localeCompare(b.routeName, undefined, { numeric: true, sensitivity: "base" });
-      }
-      const aHasSummary = !!a.summaryName;
-      const bHasSummary = !!b.summaryName;
-      if (aHasSummary !== bHasSummary) return bHasSummary ? 1 : -1;
-      return a.routeName.localeCompare(b.routeName, undefined, { numeric: true, sensitivity: "base" });
-    });
+  const compareNames = (left, right) =>
+    String(left || "").localeCompare(String(right || ""), undefined, { numeric: true, sensitivity: "base" });
+
+  const sortRouteEntries = entries => entries.slice().sort((a, b) => {
+    if (activeSortMode === "date-desc") {
+      const delta = b.addedTimestamp - a.addedTimestamp;
+      if (delta !== 0) return delta;
+      return compareNames(a.routeName, b.routeName);
+    }
+    if (activeSortMode === "date-asc") {
+      const delta = a.addedTimestamp - b.addedTimestamp;
+      if (delta !== 0) return delta;
+      return compareNames(a.routeName, b.routeName);
+    }
+    return compareNames(a.routeName, b.routeName);
+  });
+
+  const sortSummaryEntries = entries => entries.slice().sort((a, b) => {
+    if (activeSortMode === "date-desc") {
+      const delta = b.addedTimestamp - a.addedTimestamp;
+      if (delta !== 0) return delta;
+      return compareNames(a.summaryName, b.summaryName);
+    }
+    if (activeSortMode === "date-asc") {
+      const delta = a.addedTimestamp - b.addedTimestamp;
+      if (delta !== 0) return delta;
+      return compareNames(a.summaryName, b.summaryName);
+    }
+    return compareNames(a.summaryName, b.summaryName);
+  });
+
+  const routeEntries = routeFiles.map(file => {
+    const routeName = file.name;
+    const summaryName = resolveSummaryForRoute(routeName, data);
+    const addedTimestamp = getSavedFileAddedTimestamp(file);
+    return { routeName, summaryName, addedTimestamp };
+  });
+
+  const routeEntriesWithSummary = sortRouteEntries(routeEntries.filter(entry => !!entry.summaryName));
+  const routeEntriesWithoutSummary = sortRouteEntries(routeEntries.filter(entry => !entry.summaryName));
 
   const summaryToRoutes = new Map();
   routeEntries.forEach(({ routeName, summaryName }) => {
@@ -25187,53 +25443,37 @@ async function listFiles() {
     summaryToRoutes.get(summaryName).push(routeName);
   });
 
-  const summaryEntries = summaryFiles
-    .map(file => {
-      const summaryName = file.name;
-      const linkedRoutes = (summaryToRoutes.get(summaryName) || [])
-        .slice()
-        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
-      const addedTimestamp = getSavedFileAddedTimestamp(file);
-      return { summaryName, linkedRoutes, addedTimestamp };
-    })
-    .sort((a, b) => {
-      if (activeSortMode === "date-desc") {
-        const delta = b.addedTimestamp - a.addedTimestamp;
-        if (delta !== 0) return delta;
-        return a.summaryName.localeCompare(b.summaryName, undefined, { numeric: true, sensitivity: "base" });
-      }
-      if (activeSortMode === "date-asc") {
-        const delta = a.addedTimestamp - b.addedTimestamp;
-        if (delta !== 0) return delta;
-        return a.summaryName.localeCompare(b.summaryName, undefined, { numeric: true, sensitivity: "base" });
-      }
-      const aLinked = a.linkedRoutes.length > 0;
-      const bLinked = b.linkedRoutes.length > 0;
-      if (aLinked !== bLinked) return bLinked ? 1 : -1;
-      return a.summaryName.localeCompare(b.summaryName, undefined, { numeric: true, sensitivity: "base" });
-    });
+  const summaryEntries = sortSummaryEntries(summaryFiles.map(file => {
+    const summaryName = file.name;
+    const linkedRoutes = (summaryToRoutes.get(summaryName) || [])
+      .slice()
+      .sort((a, b) => compareNames(a, b));
+    const addedTimestamp = getSavedFileAddedTimestamp(file);
+    return { summaryName, linkedRoutes, addedTimestamp };
+  }));
+  const unattachedSummaryEntries = summaryEntries.filter(entry => !entry.linkedRoutes.length);
 
   const routeFileNames = routeEntries.map(entry => entry.routeName);
-  const appendSectionTitle = title => {
+  const routesTabBtn = document.getElementById("savedFilesRoutesTab");
+  const unattachedTabBtn = document.getElementById("savedFilesDetachedSummariesTab");
+  if (routesTabBtn) routesTabBtn.textContent = `Route Files (${routeEntries.length})`;
+  if (unattachedTabBtn) unattachedTabBtn.textContent = `Unattached Summaries (${unattachedSummaryEntries.length})`;
+
+  const appendSectionTitle = (container, title) => {
     const heading = document.createElement("div");
     heading.className = "saved-files-section-title";
     heading.textContent = title;
-    ul.appendChild(heading);
+    container.appendChild(heading);
   };
 
-  if (!routeEntries.length && !summaryEntries.length) {
+  const appendEmptyState = (container, message) => {
     const empty = document.createElement("div");
     empty.className = "saved-files-empty";
-    empty.textContent = "No saved route or summary files found.";
-    ul.appendChild(empty);
-    return;
-  }
+    empty.textContent = message;
+    container.appendChild(empty);
+  };
 
-  if (routeEntries.length) {
-    appendSectionTitle("Route Files");
-  }
-
-  routeEntries.forEach(({ routeName, summaryName }) => {
+  const renderRouteEntry = ({ routeName, summaryName }) => {
     const li = document.createElement("li");
     li.className = `saved-route-item${summaryName ? " has-summary" : ""}`;
 
@@ -25293,10 +25533,33 @@ async function listFiles() {
       };
       actions.appendChild(summaryBtn);
     } else {
-      const summarySpacer = document.createElement("span");
-      summarySpacer.className = "saved-file-btn-spacer";
-      summarySpacer.setAttribute("aria-hidden", "true");
-      actions.appendChild(summarySpacer);
+      const editBtn = document.createElement("button");
+      editBtn.className = "saved-file-btn edit-btn";
+      editBtn.textContent = "Edit";
+      editBtn.onclick = async () => {
+        const entered = prompt("Enter password to edit this saved file:");
+        if (entered !== DELETE_PASSWORD) {
+          alert("\u274C Incorrect password. File was not moved.");
+          return;
+        }
+
+        const confirmed = confirm(
+          `Move ${routeName} to the Unattached Summaries tab?\n\n` +
+          "Use this when the file should be treated like a summary file instead of a route file."
+        );
+        if (!confirmed) return;
+
+        removeRouteSummaryAttachment(routeName);
+        addManualSummaryFile(routeName);
+        await Promise.all([
+          flushSummaryAttachmentsCloudSave(),
+          flushManualSummaryFilesCloudSave()
+        ]);
+        await listFiles();
+        setSavedFilesActiveTab("summaries");
+        alert(`Moved ${routeName} to Unattached Summaries.`);
+      };
+      actions.appendChild(editBtn);
     }
 
     const delBtn = document.createElement("button");
@@ -25332,16 +25595,12 @@ async function listFiles() {
     actions.appendChild(delBtn);
 
     li.append(infoWrap, actions);
-    ul.appendChild(li);
-  });
+    routeList.appendChild(li);
+  };
 
-  if (summaryEntries.length) {
-    appendSectionTitle("Route Summary Files");
-  }
-
-  summaryEntries.forEach(({ summaryName, linkedRoutes }) => {
+  const renderUnattachedSummaryEntry = ({ summaryName }) => {
     const li = document.createElement("li");
-    li.className = `saved-route-item saved-summary-item${linkedRoutes.length ? " has-summary" : ""}`;
+    li.className = "saved-route-item saved-summary-item";
 
     const infoWrap = document.createElement("div");
     infoWrap.className = "saved-route-info";
@@ -25359,18 +25618,9 @@ async function listFiles() {
     metaRow.appendChild(summaryTypeBadge);
 
     const badge = document.createElement("span");
-    badge.className = `saved-summary-badge${linkedRoutes.length ? "" : " missing"}`;
-    badge.textContent = linkedRoutes.length ? "Attached" : "Not Attached";
+    badge.className = "saved-summary-badge missing";
+    badge.textContent = "Not Attached";
     metaRow.appendChild(badge);
-
-    if (linkedRoutes.length) {
-      const attachedRouteNode = document.createElement("span");
-      attachedRouteNode.className = "saved-summary-file";
-      attachedRouteNode.textContent = linkedRoutes.length === 1
-        ? `Attached to Route: ${linkedRoutes[0]}`
-        : `Attached to Routes: ${linkedRoutes.slice(0, 2).join(", ")}${linkedRoutes.length > 2 ? ` (+${linkedRoutes.length - 2} more)` : ""}`;
-      metaRow.appendChild(attachedRouteNode);
-    }
 
     infoWrap.append(nameNode, metaRow);
 
@@ -25402,6 +25652,11 @@ async function listFiles() {
       const selectedRoute = await openSummaryAttachModal(summaryName, routeFileNames);
       if (!selectedRoute) return;
       setRouteSummaryAttachment(selectedRoute, summaryName);
+      removeManualSummaryFile(summaryName);
+      await Promise.all([
+        flushSummaryAttachmentsCloudSave(),
+        flushManualSummaryFilesCloudSave()
+      ]);
       alert(`Attached ${summaryName} to ${selectedRoute}.`);
       listFiles();
     };
@@ -25421,12 +25676,18 @@ async function listFiles() {
       if (!confirmed) return;
 
       await sb.storage.from(BUCKET).remove([summaryName]);
+      removeManualSummaryFile(summaryName);
 
       const map = getSummaryAttachments();
       Object.keys(map).forEach(routeKey => {
-        if (map[routeKey] === summaryName) delete map[routeKey];
+        const detachedSummary = parseDetachedSummaryMarker(map[routeKey]);
+        if (map[routeKey] === summaryName || detachedSummary === summaryName) delete map[routeKey];
       });
       setSummaryAttachments(map);
+      await Promise.all([
+        flushSummaryAttachmentsCloudSave(),
+        flushManualSummaryFilesCloudSave()
+      ]);
 
       alert("\u2705 File deleted successfully.");
       listFiles();
@@ -25434,8 +25695,29 @@ async function listFiles() {
     actions.appendChild(delBtn);
 
     li.append(infoWrap, actions);
-    ul.appendChild(li);
-  });
+    unattachedSummaryList.appendChild(li);
+  };
+
+  if (routeEntriesWithSummary.length) {
+    appendSectionTitle(routeList, "Route Files With Summary");
+    routeEntriesWithSummary.forEach(renderRouteEntry);
+  }
+
+  if (routeEntriesWithoutSummary.length) {
+    appendSectionTitle(routeList, "Route Files Without Summary");
+    routeEntriesWithoutSummary.forEach(renderRouteEntry);
+  }
+
+  if (!routeEntries.length) {
+    appendEmptyState(routeList, "No saved route files found.");
+  }
+
+  if (unattachedSummaryEntries.length) {
+    appendSectionTitle(unattachedSummaryList, "Unattached Route Summaries");
+    unattachedSummaryEntries.forEach(renderUnattachedSummaryEntry);
+  } else {
+    appendEmptyState(unattachedSummaryList, "No unattached summary files found.");
+  }
 }
 
 
@@ -28479,10 +28761,31 @@ const openFileManagerBtn = document.getElementById("openFileManagerBtn");
 const closeFileManagerBtn = document.getElementById("closeFileManager");
 const savedFilesSortSelect = document.getElementById("savedFilesSortSelect");
 const savedFilesGuide = document.getElementById("savedFilesGuide");
+const savedFilesRoutesTab = document.getElementById("savedFilesRoutesTab");
+const savedFilesDetachedSummariesTab = document.getElementById("savedFilesDetachedSummariesTab");
+const savedFilesRoutesPanel = document.getElementById("savedFilesRoutesPanel");
+const savedFilesDetachedSummariesPanel = document.getElementById("savedFilesDetachedSummariesPanel");
+
+function setSavedFilesActiveTab(tabName = "routes") {
+  const showRoutes = tabName !== "summaries";
+  if (savedFilesRoutesTab) {
+    savedFilesRoutesTab.classList.toggle("active", showRoutes);
+    savedFilesRoutesTab.setAttribute("aria-selected", showRoutes ? "true" : "false");
+  }
+  if (savedFilesDetachedSummariesTab) {
+    savedFilesDetachedSummariesTab.classList.toggle("active", !showRoutes);
+    savedFilesDetachedSummariesTab.setAttribute("aria-selected", showRoutes ? "false" : "true");
+  }
+  if (savedFilesRoutesPanel) savedFilesRoutesPanel.hidden = !showRoutes;
+  if (savedFilesDetachedSummariesPanel) savedFilesDetachedSummariesPanel.hidden = showRoutes;
+}
 
 function markSavedFilesGuideSeen() {
   storageSet("savedFilesGuideSeen", "1");
 }
+
+savedFilesRoutesTab?.addEventListener("click", () => setSavedFilesActiveTab("routes"));
+savedFilesDetachedSummariesTab?.addEventListener("click", () => setSavedFilesActiveTab("summaries"));
 
 if (openFileManagerBtn) {
   if (savedFilesGuide) savedFilesGuide.classList.remove("hidden");
@@ -28490,8 +28793,10 @@ if (openFileManagerBtn) {
   openFileManagerBtn.classList.add("attention");
 
   openFileManagerBtn.addEventListener("click", () => {
+    setSavedFilesActiveTab("routes");
     fileManagerModal.style.display = "flex";
     markSavedFilesGuideSeen();
+    listFiles();
   });
 }
 

@@ -3544,21 +3544,21 @@ body.sun-mode .road-attributes-table-wrap td {
 
 
 /* ================= SAVED FILES LIST ================= */
-#savedFiles {
+.saved-files-list {
   list-style: none;
   padding-left: 0;
   margin: 0;
   font-size: 13px;
 }
 
-#savedFiles li {
+.saved-files-list li {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
 }
 
-#savedFiles button {
+.saved-files-list button {
   background: #333;
   color: #eee;
   border: none;
@@ -3568,7 +3568,7 @@ body.sun-mode .road-attributes-table-wrap td {
   cursor: pointer;
 }
 
-#savedFiles button:hover {
+.saved-files-list button:hover {
   background: #42a5f5;
   color: #000;
 }
@@ -4460,7 +4460,7 @@ body.sun-mode .loading-card {
 }
 
 body.sun-mode .file-list button,
-body.sun-mode #savedFiles button {
+body.sun-mode .saved-files-list button {
   background: #ffffff !important;
   color: #0f1a26 !important;
   border: 1px solid #ccd8e5 !important;
@@ -5488,7 +5488,7 @@ body.sun-mode .loading-card {
 }
 
 body.sun-mode .file-list button,
-body.sun-mode #savedFiles button {
+body.sun-mode .saved-files-list button {
   background: #ffffff !important;
   color: #0f1a26 !important;
   border: 1px solid #ccd8e5 !important;
@@ -7340,7 +7340,7 @@ body.sun-mode .loading-card {
 }
 
 body.sun-mode .file-list button,
-body.sun-mode #savedFiles button {
+body.sun-mode .saved-files-list button {
   background: #ffffff !important;
   color: #0f1a26 !important;
   border: 1px solid #ccd8e5 !important;
@@ -11507,12 +11507,43 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
 }
 
 /* ===== Saved Files: Summary Visibility ===== */
-#savedFiles {
+.saved-files-list {
   display: grid;
   gap: 8px;
 }
 
-#savedFiles .saved-files-section-title {
+.saved-files-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 10px;
+  flex-wrap: wrap;
+}
+
+.saved-files-tab {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid #4d647b;
+  background: linear-gradient(160deg, #223243 0%, #182330 100%);
+  color: #dcecff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.saved-files-tab.active {
+  border-color: #5ca6e3;
+  background: linear-gradient(160deg, #2f5f8d 0%, #214668 100%);
+  color: #ffffff;
+  box-shadow: 0 6px 16px rgba(18, 42, 63, 0.2);
+}
+
+.saved-files-panel[hidden] {
+  display: none !important;
+}
+
+.saved-files-list .saved-files-section-title {
   margin: 2px 0 0;
   font-size: 11px;
   font-weight: 800;
@@ -11521,7 +11552,7 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   color: #8fb7d8;
 }
 
-#savedFiles .saved-files-empty {
+.saved-files-list .saved-files-empty {
   padding: 10px 12px;
   border: 1px dashed #5a7591;
   border-radius: 10px;
@@ -11530,7 +11561,7 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   text-align: center;
 }
 
-#savedFiles .saved-route-item {
+.saved-files-list .saved-route-item {
   display: grid;
   grid-template-columns: 1fr;
   align-items: start;
@@ -11543,24 +11574,24 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   background: linear-gradient(160deg, #1f2d3a 0%, #17232e 100%);
 }
 
-#savedFiles .saved-route-item.has-summary {
+.saved-files-list .saved-route-item.has-summary {
   border-color: #4ca3e8;
   box-shadow: inset 0 0 0 1px rgba(76, 163, 232, 0.3), 0 6px 14px rgba(19, 47, 71, 0.22);
   background: linear-gradient(160deg, #243749 0%, #1a2b3a 100%);
 }
 
-#savedFiles .saved-route-item.saved-summary-item {
+.saved-files-list .saved-route-item.saved-summary-item {
   border-color: #4b8a6f;
   background: linear-gradient(160deg, #20362e 0%, #182a24 100%);
 }
 
-#savedFiles .saved-route-info {
+.saved-files-list .saved-route-info {
   min-width: 0;
   display: grid;
   gap: 4px;
 }
 
-#savedFiles .saved-route-name {
+.saved-files-list .saved-route-name {
   font-size: 13px;
   font-weight: 700;
   color: #ecf6ff;
@@ -11570,14 +11601,14 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   word-break: break-word;
 }
 
-#savedFiles .saved-route-meta {
+.saved-files-list .saved-route-meta {
   display: flex;
   align-items: center;
   gap: 7px;
   flex-wrap: wrap;
 }
 
-#savedFiles .saved-file-type-badge {
+.saved-files-list .saved-file-type-badge {
   display: inline-flex;
   align-items: center;
   min-height: 20px;
@@ -11592,19 +11623,19 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   text-transform: uppercase;
 }
 
-#savedFiles .saved-file-type-badge.route {
+.saved-files-list .saved-file-type-badge.route {
   border-color: #62a7d9;
   background: rgba(56, 129, 191, 0.2);
   color: #d7ecff;
 }
 
-#savedFiles .saved-file-type-badge.summary {
+.saved-files-list .saved-file-type-badge.summary {
   border-color: #58b687;
   background: rgba(62, 156, 105, 0.2);
   color: #ccf6de;
 }
 
-#savedFiles .saved-summary-badge {
+.saved-files-list .saved-summary-badge {
   display: inline-flex;
   align-items: center;
   min-height: 20px;
@@ -11619,13 +11650,13 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   text-transform: uppercase;
 }
 
-#savedFiles .saved-summary-badge.missing {
+.saved-files-list .saved-summary-badge.missing {
   border-color: #8ca1b6;
   background: rgba(95, 118, 142, 0.2);
   color: #d3e0ed;
 }
 
-#savedFiles .saved-summary-file {
+.saved-files-list .saved-summary-file {
   font-size: 11px;
   color: #b7ccdf;
   white-space: normal;
@@ -11635,7 +11666,7 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   max-width: none;
 }
 
-#savedFiles .saved-route-actions {
+.saved-files-list .saved-route-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
@@ -11644,7 +11675,11 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   width: 100%;
 }
 
-#savedFiles .saved-route-actions .saved-file-btn {
+.saved-files-list .saved-route-actions.has-edit {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.saved-files-list .saved-route-actions .saved-file-btn {
   width: 100%;
   min-height: 28px;
   border-radius: 8px;
@@ -11659,123 +11694,154 @@ body.print-mode-map.print-mode-map-legend-pos-outside-left .map-print-legend-pan
   cursor: pointer;
 }
 
-#savedFiles .saved-file-btn-spacer {
+.saved-files-list .saved-file-btn-spacer {
   width: 100%;
   min-height: 28px;
   visibility: hidden;
   pointer-events: none;
 }
 
-#savedFiles .saved-route-actions .saved-file-btn:hover {
+.saved-files-list .saved-route-actions .saved-file-btn:hover {
   background: linear-gradient(160deg, #3a5670 0%, #314a62 100%);
   color: #ffffff;
 }
 
-#savedFiles .saved-route-actions .open-btn {
+.saved-files-list .saved-route-actions .open-btn {
   border-color: #4f90c9;
   background: linear-gradient(160deg, #2b6da3 0%, #1f5685 100%);
 }
 
-#savedFiles .saved-route-actions .summary-btn {
+.saved-files-list .saved-route-actions .summary-btn {
   border-color: #53b17d;
   background: linear-gradient(160deg, #2c7a53 0%, #205e3f 100%);
 }
 
-#savedFiles .saved-route-actions .delete-btn {
+.saved-files-list .saved-route-actions .edit-btn {
+  border-color: #c39658;
+  background: linear-gradient(160deg, #8e6630 0%, #6d4f25 100%);
+}
+
+.saved-files-list .saved-route-actions .delete-btn {
   border-color: #be6464;
   background: linear-gradient(160deg, #903838 0%, #702c2c 100%);
 }
 
-body.sun-mode #savedFiles .saved-route-item {
+body.sun-mode .saved-files-tab {
+  border-color: #bfd4e7 !important;
+  background: linear-gradient(160deg, #ffffff 0%, #edf5fb 100%) !important;
+  color: #214660 !important;
+}
+
+body.sun-mode .saved-files-tab.active {
+  border-color: #74aedd !important;
+  background: linear-gradient(160deg, #eaf5ff 0%, #dbeefe 100%) !important;
+  color: #174569 !important;
+}
+
+body.sun-mode .saved-files-list .saved-route-item {
   border-color: #cad9e8 !important;
   background: linear-gradient(160deg, #ffffff 0%, #f4f8fc 100%) !important;
 }
 
-body.sun-mode #savedFiles .saved-route-item.has-summary {
+body.sun-mode .saved-files-list .saved-route-item.has-summary {
   border-color: #5aa3df !important;
   box-shadow: inset 0 0 0 1px rgba(90, 163, 223, 0.24), 0 6px 12px rgba(36, 81, 118, 0.14) !important;
   background: linear-gradient(160deg, #f6fbff 0%, #edf5fc 100%) !important;
 }
 
-body.sun-mode #savedFiles .saved-route-item.saved-summary-item {
+body.sun-mode .saved-files-list .saved-route-item.saved-summary-item {
   border-color: #a8d1b9 !important;
   background: linear-gradient(160deg, #f5fcf8 0%, #ebf7f0 100%) !important;
 }
 
-body.sun-mode #savedFiles .saved-route-name {
+body.sun-mode .saved-files-list .saved-route-name {
   color: #12324c !important;
 }
 
-body.sun-mode #savedFiles .saved-summary-badge {
+body.sun-mode .saved-files-list .saved-summary-badge {
   border-color: #6eb88d !important;
   background: rgba(67, 163, 106, 0.14) !important;
   color: #1f5e38 !important;
 }
 
-body.sun-mode #savedFiles .saved-summary-badge.missing {
+body.sun-mode .saved-files-list .saved-summary-badge.missing {
   border-color: #b5c8dc !important;
   background: rgba(162, 180, 198, 0.2) !important;
   color: #33526c !important;
 }
 
-body.sun-mode #savedFiles .saved-summary-file {
+body.sun-mode .saved-files-list .saved-summary-file {
   color: #4f6f89 !important;
 }
 
-body.sun-mode #savedFiles .saved-file-type-badge {
+body.sun-mode .saved-files-list .saved-file-type-badge {
   border-color: #86b8df !important;
   background: rgba(97, 154, 203, 0.16) !important;
   color: #1f4f76 !important;
 }
 
-body.sun-mode #savedFiles .saved-file-type-badge.summary {
+body.sun-mode .saved-files-list .saved-file-type-badge.summary {
   border-color: #90cfae !important;
   background: rgba(124, 188, 147, 0.18) !important;
   color: #255e3d !important;
 }
 
-body.sun-mode #savedFiles .saved-files-section-title {
+body.sun-mode .saved-files-list .saved-files-section-title {
   color: #416785 !important;
 }
 
-body.sun-mode #savedFiles .saved-files-empty {
+body.sun-mode .saved-files-list .saved-files-empty {
   border-color: #b9cde2 !important;
   color: #496984 !important;
   background: #f7fbff !important;
 }
 
-body.sun-mode #savedFiles .saved-route-actions .saved-file-btn {
+body.sun-mode .saved-files-list .saved-route-actions .saved-file-btn {
   border-color: #b9cce0 !important;
   background: linear-gradient(160deg, #ffffff 0%, #edf4fb 100%) !important;
   color: #1c3f5f !important;
 }
 
-body.sun-mode #savedFiles .saved-route-actions .open-btn {
+body.sun-mode .saved-files-list .saved-route-actions .open-btn {
   border-color: #7cb5e3 !important;
   background: linear-gradient(160deg, #eef7ff 0%, #dcebfa 100%) !important;
 }
 
-body.sun-mode #savedFiles .saved-route-actions .summary-btn {
+body.sun-mode .saved-files-list .saved-route-actions .summary-btn {
   border-color: #90c7a4 !important;
   background: linear-gradient(160deg, #edf8f1 0%, #deefe4 100%) !important;
 }
 
-body.sun-mode #savedFiles .saved-route-actions .delete-btn {
+body.sun-mode .saved-files-list .saved-route-actions .edit-btn {
+  border-color: #d5b07d !important;
+  background: linear-gradient(160deg, #fff6ea 0%, #f7ead8 100%) !important;
+}
+
+body.sun-mode .saved-files-list .saved-route-actions .delete-btn {
   border-color: #d9a5a5 !important;
   background: linear-gradient(160deg, #fff2f2 0%, #fbe4e4 100%) !important;
 }
 
 @media (max-width: 760px) {
-  #savedFiles .saved-route-item {
+  .saved-files-tab {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .saved-files-list .saved-route-item {
     align-items: flex-start;
   }
 
-  #savedFiles .saved-route-actions {
+  .saved-files-list .saved-route-actions {
     width: 100%;
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  #savedFiles .saved-summary-file {
+  .saved-files-list .saved-route-actions.has-edit {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .saved-files-list .saved-summary-file {
     max-width: 100%;
   }
 }

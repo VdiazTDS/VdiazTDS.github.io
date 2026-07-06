@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
   <!-- Your CSS -->
-  <link rel="stylesheet" href="style-tds-pak.css" />
+  <link rel="stylesheet" href="style-tds-pak.css?v=20260706-03" />
 
   <link rel="icon" href="favicon.ico" />
 
@@ -643,7 +643,7 @@
 <div id="fileManagerModal" class="modal">
   <div class="modal-content">
     <h3>Saved Excel Files (Open Here)</h3>
-    <p class="saved-files-modal-help">Files marked <strong>Summary Attached</strong> already have a linked summary. Use <strong>Order Files By</strong> to sort by date added, and choose <strong>Open Map</strong> or <strong>Summary</strong> as needed.</p>
+    <p class="saved-files-modal-help">Route files appear first, with summary-attached routes grouped ahead of routes that still need a summary. Use <strong>Edit</strong> on a route file with <strong>No Summary</strong> to move that file into <strong>Unattached Summaries</strong> after the password check.</p>
     <div class="saved-files-sort-row">
       <label for="savedFilesSortSelect">Order Files By</label>
       <select id="savedFilesSortSelect" aria-label="Order saved files">
@@ -653,7 +653,17 @@
       </select>
     </div>
 
-    <div id="savedFiles" class="file-list"></div>
+    <div class="saved-files-tabs" role="tablist" aria-label="Saved file categories">
+      <button id="savedFilesRoutesTab" class="saved-files-tab active" type="button" role="tab" aria-selected="true" aria-controls="savedFilesRoutesPanel">Route Files</button>
+      <button id="savedFilesDetachedSummariesTab" class="saved-files-tab" type="button" role="tab" aria-selected="false" aria-controls="savedFilesDetachedSummariesPanel">Unattached Summaries</button>
+    </div>
+
+    <div id="savedFilesRoutesPanel" class="saved-files-panel" role="tabpanel" aria-labelledby="savedFilesRoutesTab">
+      <div id="savedFiles" class="file-list saved-files-list"></div>
+    </div>
+    <div id="savedFilesDetachedSummariesPanel" class="saved-files-panel" role="tabpanel" aria-labelledby="savedFilesDetachedSummariesTab" hidden>
+      <div id="savedFilesDetachedSummaries" class="file-list saved-files-list"></div>
+    </div>
 
     <div class="modal-actions">
       <button id="closeFileManager">Close</button>
@@ -1820,7 +1830,7 @@
   </div>
 </div>
 <script src="https://unpkg.com/shpjs@6.2.0/dist/shp.min.js" defer></script>
-<script src="app-tds-pak.js?v=20260706-01" defer></script>
+<script src="app-tds-pak.js?v=20260706-03" defer></script>
 <!-- MOBILE Selected Stops Button -->
 <button id="mobileSelectionBtn">Selected: 0</button>
 
