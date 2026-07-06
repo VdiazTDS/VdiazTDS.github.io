@@ -40,7 +40,7 @@ const COLUMN_MAPPING_CLOUD_FILE = "__tds_pak_column_mappings.json";
 const SHARED_SAVED_FILE_PARAM = "sharedFile";
 const SHARED_SAVED_FILE_TYPE_PARAM = "sharedType";
 const TDS_PAK_PUBLIC_SHARE_URL = "https://vdiaztds.github.io/tds-pak.html";
-const TDS_PAK_SHARE_LINK_CACHE_BUSTER = "20260706-05";
+const TDS_PAK_SHARE_LINK_CACHE_BUSTER = "20260706-06";
 const SHARED_FACILITIES_SHEET_NAME = "Facilities";
 const SHARED_FACILITIES_CLOUD_SAVE_DEBOUNCE_MS = 1200;
 const SUMMARY_ATTACH_CLOUD_SAVE_DEBOUNCE_MS = 700;
@@ -11266,6 +11266,38 @@ function collectColumnMappingHeaders(rows, sampleLimit = 25) {
     });
   });
   return [...headerSet];
+}
+
+function buildColumnMappingSampleByHeader(rows, headers) {
+  const sampleByHeader = {};
+  const list = Array.isArray(rows) ? rows : [];
+  const columns = Array.isArray(headers) ? headers : [];
+  columns.forEach(header => {
+    const row = list.find(item => String(item?.[header] ?? "").trim() !== "");
+    sampleByHeader[header] = row ? row[header] : "";
+  });
+  return sampleByHeader;
+}
+
+function mappingHasAllRequiredFields(mapping) {
+  const normalizedMapping = normalizeSingleColumnMapping(mapping);
+  return COLUMN_MAPPING_FIELDS
+    .filter(field => field.required)
+    .every(field => String(normalizedMapping[field.key] ?? "").trim());
+}
+
+function rowsContainValidCoordinatesForMapping(rows, mapping) {
+  const normalizedMapping = normalizeSingleColumnMapping(mapping);
+  const latField = String(normalizedMapping.LATITUDE || "LATITUDE").trim();
+  const lonField = String(normalizedMapping.LONGITUDE || "LONGITUDE").trim();
+  const list = Array.isArray(rows) ? rows : [];
+
+  return list.some(row => {
+    if (!row || typeof row !== "object") return false;
+    const lat = Number(row?.[latField]);
+    const lon = Number(row?.[lonField]);
+    return Number.isFinite(lat) && Number.isFinite(lon);
+  });
 }
 
 function buildColumnMappingGuess(headers) {
@@ -25172,6 +25204,12 @@ function openAttributeTablePopout() {
   });
 }
 async function prepareMappedWorkbookForUpload(buffer, fileName) {
+  return prepareMappedWorkbookForRouteLoad(buffer, fileName, {
+    alwaysPrompt: true
+  });
+}
+
+async function prepareMappedWorkbookForRouteLoad(buffer, fileName, options = {}) {
   await ensureFileColumnMappingsInitialized();
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
@@ -25181,16 +25219,37 @@ async function prepareMappedWorkbookForUpload(buffer, fileName) {
 
   const headers = collectColumnMappingHeaders(rows);
   const initial = buildInitialColumnMapping(headers, fileName);
-  const sampleByHeader = {};
-  headers.forEach(h => {
-    const row = rows.find(r => String(r?.[h] ?? "").trim() !== "");
-    sampleByHeader[h] = row ? row[h] : "";
-  });
+  const sampleByHeader = buildColumnMappingSampleByHeader(rows, headers);
 
-  const mapping = await openColumnMappingPrompt(headers, initial, fileName, sampleByHeader);
-  if (!mapping) return null;
+  const alwaysPrompt = !!options.alwaysPrompt;
+  const promptIfRequiredFieldsMissing = options.promptIfRequiredFieldsMissing !== false;
+  const promptIfCoordinatesMissing = !!options.promptIfCoordinatesMissing;
+  const initialHasRequiredFields = mappingHasAllRequiredFields(initial);
+  const initialHasCoordinates = rowsContainValidCoordinatesForMapping(rows, initial);
+  const shouldPrompt =
+    alwaysPrompt ||
+    (promptIfRequiredFieldsMissing && !initialHasRequiredFields) ||
+    (promptIfCoordinatesMissing && !initialHasCoordinates);
+
+  let mapping = initial;
+  if (shouldPrompt) {
+    if (typeof options.beforePrompt === "function") {
+      await options.beforePrompt();
+    }
+    mapping = await openColumnMappingPrompt(headers, initial, fileName, sampleByHeader);
+    if (!mapping) return null;
+    if (typeof options.afterPrompt === "function") {
+      await options.afterPrompt();
+    }
+  }
 
   applyColumnAliasesToRows(rows, mapping);
+
+  if (String(fileName || "").trim() && Object.keys(normalizeSingleColumnMapping(mapping)).length) {
+    setSavedColumnMappingForFile(fileName, mapping);
+    await flushFileColumnMappingsCloudSave();
+  }
+
   return { wb, rows, mapping, headers };
 }
 
@@ -25370,9 +25429,25 @@ async function openRouteFileFromCloud(routeName, options = {}) {
     const response = await fetch(urlWithBypass, { cache: "no-store" });
     if (!response.ok) throw new Error(`File fetch failed (${response.status}).`);
 
+    const fileBuffer = await response.arrayBuffer();
+    const mappedWorkbook = await prepareMappedWorkbookForRouteLoad(fileBuffer, name, {
+      promptIfRequiredFieldsMissing: true,
+      promptIfCoordinatesMissing: true,
+      beforePrompt: async () => {
+        hideLoading();
+      },
+      afterPrompt: async () => {
+        showLoading(loadingMessage);
+      }
+    });
+    if (!mappedWorkbook) {
+      hideLoading();
+      return false;
+    }
+
     window._currentFilePath = name;
     setCurrentFileDisplay(window._currentFilePath);
-    processExcelBuffer(await response.arrayBuffer());
+    processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
 
     if (loadSummary) {
       await loadSummaryFor(name);
@@ -25919,10 +25994,6 @@ async function uploadFile(file) {
     setCurrentFileDisplay(window._currentFilePath);
 
     processExcelBuffer(fileBuffer, mappedWorkbook.rows, mappedWorkbook.wb);
-    if (mappedWorkbook.mapping) {
-      setSavedColumnMappingForFile(file.name, mappedWorkbook.mapping);
-      await flushFileColumnMappingsCloudSave();
-    }
     const mappedWorkbookSaved = await saveWorkbookToCloud();
     if (!mappedWorkbookSaved) {
       throw new Error("Mapped workbook cloud save failed.");
