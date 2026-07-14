@@ -11617,6 +11617,38 @@ function hasWorkbookCloudSaveContext() {
   return !!filePath && !!window._currentWorkbook && Array.isArray(window._currentRows);
 }
 
+async function saveWorkbookToCloud() {
+  if (!window._currentWorkbook || !Array.isArray(window._currentRows)) return false;
+  const filePath = String(window._currentFilePath || "").trim();
+  if (!filePath) return false;
+  syncCurrentWorkbookSheetFromRows();
+
+  const bookType = filePath.toLowerCase().endsWith(".xlsm")
+    ? "xlsm"
+    : "xlsx";
+
+  const wbArray = XLSX.write(window._currentWorkbook, {
+    bookType,
+    type: "array"
+  });
+
+  const { error } = await sb.storage
+    .from(BUCKET)
+    .upload(filePath, wbArray, {
+      upsert: true,
+      contentType: bookType === "xlsm"
+        ? "application/vnd.ms-excel.sheet.macroEnabled.12"
+        : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    });
+
+  if (error) {
+    console.error("Cloud Save Error:", error);
+    return false;
+  }
+
+  return true;
+}
+
 async function flushQueuedWorkbookCloudSave() {
   if (!workbookAutoSavePendingReasons.length) return false;
   if (!hasWorkbookCloudSaveContext()) {
@@ -29638,38 +29670,6 @@ if (clearSearchBtn) {
     clearMapSearchVisualFocus();
     hideSearchResultsPanel();
   });
-}
-////////////////central save function
-async function saveWorkbookToCloud() {
-  if (!window._currentWorkbook || !Array.isArray(window._currentRows)) return false;
-  const filePath = String(window._currentFilePath || "").trim();
-  if (!filePath) return false;
-  syncCurrentWorkbookSheetFromRows();
-
-  const bookType = filePath.toLowerCase().endsWith(".xlsm")
-    ? "xlsm"
-    : "xlsx";
-
-  const wbArray = XLSX.write(window._currentWorkbook, {
-    bookType,
-    type: "array"
-  });
-
-  const { error } = await sb.storage
-    .from(BUCKET)
-    .upload(filePath, wbArray, {
-      upsert: true,
-      contentType: bookType === "xlsm"
-        ? "application/vnd.ms-excel.sheet.macroEnabled.12"
-        : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    });
-
-  if (error) {
-    console.error("Cloud Save Error:", error);
-    return false;
-  }
-
-  return true;
 }
 
 
