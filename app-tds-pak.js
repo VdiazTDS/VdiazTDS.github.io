@@ -13981,6 +13981,131 @@ function buildSummaryTablePrintDocumentHtml() {
   `;
 }
 
+function normalizeSummaryHeaderValue(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function findSummaryHeaderByAliases(headers, aliases, options = {}) {
+  const allowReverseFuzzy = options?.allowReverseFuzzy !== false;
+  const normalizedHeaders = (Array.isArray(headers) ? headers : []).map(header => ({
+    original: header,
+    norm: normalizeSummaryHeaderValue(header)
+  }));
+  const aliasNorms = (Array.isArray(aliases) ? aliases : [])
+    .map(normalizeSummaryHeaderValue)
+    .filter(Boolean);
+  if (!aliasNorms.length) return null;
+
+  const direct = normalizedHeaders.find(header => aliasNorms.includes(header.norm));
+  if (direct) return direct.original;
+
+  const fuzzy = normalizedHeaders.find(header =>
+    aliasNorms.some(alias => header.norm.includes(alias) || (allowReverseFuzzy && alias.includes(header.norm)))
+  );
+  return fuzzy ? fuzzy.original : null;
+}
+
+function parseSummaryRouteDayCombinedValue(rawValue) {
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return null;
+
+  const separators = ["|", "/", "\\", " - ", "-", ":"];
+  for (const separator of separators) {
+    if (!raw.includes(separator)) continue;
+    const parts = raw
+      .split(separator)
+      .map(part => String(part).trim())
+      .filter(Boolean);
+    if (parts.length === 2) {
+      return { route: parts[0], day: parts[1] };
+    }
+  }
+
+  const trailingDayMatch = raw.match(/^(.*?)\s+(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|[1-7])$/i);
+  if (trailingDayMatch) {
+    return {
+      route: String(trailingDayMatch[1] || "").trim(),
+      day: String(trailingDayMatch[2] || "").trim()
+    };
+  }
+
+  return null;
+}
+
+function getSummaryRouteDayFields(headers) {
+  const routeDayHeader = findSummaryHeaderByAliases(headers, ["routeplusday", "routeandday", "route_day", "routebyday", "routewithday", "route day"], {
+    allowReverseFuzzy: false
+  });
+  let routeHeader = findSummaryHeaderByAliases(headers, ["route", "newroute", "routeid", "rte", "routecode"]);
+  let dayHeader = findSummaryHeaderByAliases(headers, ["day", "newday", "dispatchday", "serviceday", "weekday"]);
+
+  if (routeDayHeader && routeHeader === routeDayHeader) routeHeader = null;
+  if (routeDayHeader && dayHeader === routeDayHeader) dayHeader = null;
+
+  return {
+    routeHeader,
+    dayHeader,
+    routeDayHeader
+  };
+}
+
+function getSummaryRouteDayFromRow(row, summaryFields = {}) {
+  let routeValue = summaryFields?.routeHeader ? String(row?.[summaryFields.routeHeader] ?? "").trim() : "";
+  let dayValue = summaryFields?.dayHeader ? String(row?.[summaryFields.dayHeader] ?? "").trim() : "";
+
+  if ((!routeValue || !dayValue) && summaryFields?.routeDayHeader) {
+    const parsed = parseSummaryRouteDayCombinedValue(row?.[summaryFields.routeDayHeader]);
+    if (parsed) {
+      if (!routeValue) routeValue = parsed.route;
+      if (!dayValue) dayValue = parsed.day;
+    }
+  }
+
+  return { routeValue, dayValue };
+}
+
+function isSummaryAggregateLabel(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text) return false;
+  return /\b(grand\s*total|sub\s*total|subtotal|totals?|sum|average|avg\.?)\b/i.test(text);
+}
+
+function isSummaryAggregateRow(row, headers, summaryFields = null) {
+  if (!row || typeof row !== "object") return false;
+
+  const orderedHeaders = Array.isArray(headers) && headers.length
+    ? headers
+    : Object.keys(row || {});
+  const resolvedFields = summaryFields || getSummaryRouteDayFields(orderedHeaders);
+  const orderedValues = orderedHeaders.map(header => row?.[header]);
+  const identityValues = [
+    resolvedFields?.routeHeader ? row?.[resolvedFields.routeHeader] : "",
+    resolvedFields?.dayHeader ? row?.[resolvedFields.dayHeader] : "",
+    resolvedFields?.routeDayHeader ? row?.[resolvedFields.routeDayHeader] : ""
+  ];
+  const leadingValues = orderedValues
+    .filter(value => String(value ?? "").trim() !== "")
+    .slice(0, 4);
+  const keywordHit = [...identityValues, ...leadingValues].some(isSummaryAggregateLabel);
+  if (!keywordHit) return false;
+  if (identityValues.some(isSummaryAggregateLabel)) return true;
+
+  let nonEmptyCount = 0;
+  let numericCount = 0;
+  orderedValues.forEach(value => {
+    const text = String(value ?? "").trim();
+    if (!text) return;
+    nonEmptyCount += 1;
+    const numericValue = Number(text.replace(/,/g, ""));
+    if (Number.isFinite(numericValue)) numericCount += 1;
+  });
+
+  return numericCount >= 2 && numericCount >= Math.max(2, Math.floor(nonEmptyCount / 2));
+}
+
 function extractSummaryAnalyticsForPrint(rows, headers) {
   const normalize = value => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const normalizedHeaders = headers.map(h => ({ original: h, norm: normalize(h) }));
@@ -14029,9 +14154,12 @@ function extractSummaryAnalyticsForPrint(rows, headers) {
     return NaN;
   };
 
+  const summaryFields = getSummaryRouteDayFields(headers);
+
   const fields = {
-    route: findHeader(["route", "newroute", "routeid", "rte"]),
-    day: findHeader(["day", "newday", "routeday", "dispatchday"]),
+    route: summaryFields.routeHeader,
+    day: summaryFields.dayHeader,
+    routeDay: summaryFields.routeDayHeader,
     stops: findHeader(["totalstops", "stops", "stopcount", "numberofstops"]),
     miles: findHeader(["miles", "totalmiles", "distancemiles", "distance"]),
     demand: findHeader(["demand", "totaldemand", "volume", "load"]),
@@ -14041,8 +14169,11 @@ function extractSummaryAnalyticsForPrint(rows, headers) {
 
   const routeDayMap = new Map();
   rows.forEach(row => {
-    const route = String(fields.route ? row?.[fields.route] : "").trim() || "Unknown Route";
-    const day = String(fields.day ? row?.[fields.day] : "").trim() || "Unknown Day";
+    if (isSummaryAggregateRow(row, headers, summaryFields)) return;
+
+    const routeDay = getSummaryRouteDayFromRow(row, summaryFields);
+    const route = String(routeDay.routeValue || "").trim() || "Unknown Route";
+    const day = String(routeDay.dayValue || "").trim() || "Unknown Day";
     const key = `${route} | ${day}`;
     if (!routeDayMap.has(key)) {
       routeDayMap.set(key, { route, day, routeDay: key, stops: 0, miles: 0, demand: 0, trips: 0, totalTime: 0 });
@@ -25521,8 +25652,8 @@ async function loadSummaryFileFromCloud(summaryName) {
   const wb = XLSX.read(new Uint8Array(await r.arrayBuffer()), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
 
-  // Read entire sheet as grid
-  const raw = XLSX.utils.sheet_to_json(ws, { header: 1 });
+  // Read the sheet using Excel's displayed cell text so the summary table matches the workbook.
+  const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
 
   // ===== FIND FIRST NON-EMPTY ROW =====
   const startRow = raw.findIndex(row =>
@@ -26232,96 +26363,7 @@ function showRouteSummary(rows, headers) {
   });
   thead.appendChild(headerRow);
 
-  const normalizeSummaryHeader = value =>
-    String(value ?? "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "");
-
-  const normalizedHeaders = headers.map(h => ({
-    original: h,
-    norm: normalizeSummaryHeader(h)
-  }));
-
-  const findHeaderByAliases = aliases => {
-    const aliasNorms = aliases.map(normalizeSummaryHeader).filter(Boolean);
-    if (!aliasNorms.length) return null;
-
-    const direct = normalizedHeaders.find(h => aliasNorms.includes(h.norm));
-    if (direct) return direct.original;
-
-    const fuzzy = normalizedHeaders.find(h =>
-      aliasNorms.some(alias => h.norm.includes(alias) || alias.includes(h.norm))
-    );
-    return fuzzy ? fuzzy.original : null;
-  };
-
-  const routeHeader = findHeaderByAliases([
-    "route",
-    "newroute",
-    "routeid",
-    "rte",
-    "routecode"
-  ]);
-
-  const dayHeader = findHeaderByAliases([
-    "day",
-    "newday",
-    "dispatchday",
-    "serviceday",
-    "weekday"
-  ]);
-
-  const routeDayHeader = findHeaderByAliases([
-    "routeplusday",
-    "routeandday",
-    "route_day",
-    "routebyday",
-    "routewithday",
-    "route day"
-  ]);
-
-  const parseRouteDayCombinedValue = rawValue => {
-    const raw = String(rawValue ?? "").trim();
-    if (!raw) return null;
-
-    const separators = ["|", "/", "\\", " - ", "-", ":"];
-    for (const separator of separators) {
-      if (!raw.includes(separator)) continue;
-      const parts = raw
-        .split(separator)
-        .map(part => String(part).trim())
-        .filter(Boolean);
-      if (parts.length === 2) {
-        return { route: parts[0], day: parts[1] };
-      }
-    }
-
-    const trailingDayMatch = raw.match(/^(.*?)\s+(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|[1-7])$/i);
-    if (trailingDayMatch) {
-      return {
-        route: String(trailingDayMatch[1] || "").trim(),
-        day: String(trailingDayMatch[2] || "").trim()
-      };
-    }
-
-    return null;
-  };
-
-  const getRouteDayFromSummaryRow = row => {
-    let routeValue = routeHeader ? String(row?.[routeHeader] ?? "").trim() : "";
-    let dayValue = dayHeader ? String(row?.[dayHeader] ?? "").trim() : "";
-
-    if ((!routeValue || !dayValue) && routeDayHeader) {
-      const parsed = parseRouteDayCombinedValue(row?.[routeDayHeader]);
-      if (parsed) {
-        if (!routeValue) routeValue = parsed.route;
-        if (!dayValue) dayValue = parsed.day;
-      }
-    }
-
-    return { routeValue, dayValue };
-  };
+  const summaryFields = getSummaryRouteDayFields(headers);
 
   const clearActiveSummaryRow = () => {
     tbody.querySelectorAll("tr.summary-route-day-row.active").forEach(rowNode => {
@@ -26406,8 +26448,13 @@ function showRouteSummary(rows, headers) {
       tr.appendChild(td);
     });
 
-    const { routeValue, dayValue } = getRouteDayFromSummaryRow(r);
-    if (routeValue && dayValue) {
+    const { routeValue, dayValue } = getSummaryRouteDayFromRow(r, summaryFields);
+    const isAggregateRow = isSummaryAggregateRow(r, headers, summaryFields);
+    if (isAggregateRow) {
+      tr.dataset.summaryAggregate = "true";
+      tr.classList.add("summary-aggregate-row");
+    }
+    if (!isAggregateRow && routeValue && dayValue) {
       tr.classList.add("summary-route-day-row");
       tr.setAttribute("tabindex", "0");
       tr.setAttribute("role", "button");
@@ -26552,8 +26599,8 @@ async function loadSummaryFor(routeFileName) {
   const wb = XLSX.read(new Uint8Array(await r.arrayBuffer()), { type: "array" });
 const ws = wb.Sheets[wb.SheetNames[0]];
 
-// Read entire sheet as grid
-const raw = XLSX.utils.sheet_to_json(ws, { header: 1 });
+// Read the sheet using Excel's displayed cell text so the summary table matches the workbook.
+const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
 
 // ===== FIND FIRST NON-EMPTY ROW =====
 let startRow = raw.findIndex(r =>
@@ -27831,6 +27878,7 @@ if (toggleBtn) {
 
                 const rows = rowCandidates
                   .map(row => {
+                    if (String(row.dataset.summaryAggregate || "").trim() === "true") return null;
                     const { route, day } = resolveRowRouteDay(row);
                     if (!route || !day) return null;
                     row.classList.add("summary-route-day-row");
@@ -28051,12 +28099,19 @@ if (toggleBtn) {
         selectedHeaders[f.key] = findHeader(f.aliases.map(normalize));
       });
 
-      const focusedRows = rows.map(r => {
+      const summaryFields = getSummaryRouteDayFields(headers);
+
+      const focusedRows = rows
+        .filter(r => !isSummaryAggregateRow(r, headers, summaryFields))
+        .map(r => {
         const out = {};
         fieldSpec.forEach(f => {
           const h = selectedHeaders[f.key];
           out[f.key] = h ? r[h] : "";
         });
+        const routeDay = getSummaryRouteDayFromRow(r, summaryFields);
+        if (routeDay.routeValue) out.route = routeDay.routeValue;
+        if (routeDay.dayValue) out.day = routeDay.dayValue;
         return out;
       });
 
