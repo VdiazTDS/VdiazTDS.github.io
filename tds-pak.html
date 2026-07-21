@@ -373,6 +373,20 @@
             <option value="SEQNO">SeqNo</option>
           </select>
         </label>
+        <div class="sequence-layer-nav" aria-label="Sequence record navigation">
+          <div id="sequenceLayerNavRouteDay" class="sequence-layer-nav-route-day">No Route+Day selected</div>
+          <div class="sequence-layer-nav-toolbar">
+            <button id="sequenceLayerFirstRecordBtn" class="sequence-layer-nav-btn" type="button" aria-label="First sequenced record" title="First sequenced record" disabled>&#124;&#9664;</button>
+            <button id="sequenceLayerSkipPrevRecordBtn" class="sequence-layer-nav-btn" type="button" aria-label="Back 5 sequenced records" title="Back 5 sequenced records" disabled>&#171;</button>
+            <button id="sequenceLayerPrevRecordBtn" class="sequence-layer-nav-btn" type="button" aria-label="Previous sequenced record" title="Previous sequenced record" disabled>&#9664;</button>
+            <input id="sequenceLayerSequenceInput" class="sequence-layer-sequence-input" type="number" min="0" step="1" aria-label="Sequence number" />
+            <button id="sequenceLayerGoSequenceBtn" class="sequence-layer-nav-btn" type="button" aria-label="Go to sequence number" title="Go to sequence number" disabled>&#8981;</button>
+            <button id="sequenceLayerNextRecordBtn" class="sequence-layer-nav-btn" type="button" aria-label="Next sequenced record" title="Next sequenced record" disabled>&#9654;</button>
+            <button id="sequenceLayerSkipNextRecordBtn" class="sequence-layer-nav-btn" type="button" aria-label="Forward 5 sequenced records" title="Forward 5 sequenced records" disabled>&#187;</button>
+            <button id="sequenceLayerLastRecordBtn" class="sequence-layer-nav-btn" type="button" aria-label="Last sequenced record" title="Last sequenced record" disabled>&#9654;&#124;</button>
+          </div>
+          <div id="sequenceLayerNavStatus" class="sequence-layer-nav-status">Turn on the layer to step through records.</div>
+        </div>
         <div id="sequenceLayerStatus" class="service-day-label-empty sequence-layer-status">
           Select Newseq or SeqNo to draw route arrows.
         </div>

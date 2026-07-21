@@ -1656,6 +1656,7 @@ initWheelZoomInputControls();
 const ROUTE_DAY_PANE = "routeDayPane";
 const STREET_NETWORK_PANE = "streetNetworkPane";
 const SEQUENCE_PANE = "sequencePane";
+const SEQUENCE_FOCUS_PANE = "sequenceFocusPane";
 const CITY_LIMITS_PANE = "cityLimitsPane";
 const TXDOT_TRAFFIC_COUNTS_PANE = "txdotTrafficCountsPane";
 const routeDayPane = map.createPane(ROUTE_DAY_PANE);
@@ -1666,6 +1667,11 @@ const sequencePane = map.createPane(SEQUENCE_PANE);
 if (sequencePane) {
   sequencePane.style.zIndex = "379";
   sequencePane.style.pointerEvents = "none";
+}
+const sequenceFocusPane = map.createPane(SEQUENCE_FOCUS_PANE);
+if (sequenceFocusPane) {
+  sequenceFocusPane.style.zIndex = "660";
+  sequenceFocusPane.style.pointerEvents = "none";
 }
 const cityLimitsPane = map.createPane(CITY_LIMITS_PANE);
 if (cityLimitsPane) {
@@ -8817,6 +8823,7 @@ const LAYER_MANAGER_STREET_KEY = "street-network";
 const ROUTE_SEQUENCE_LAYER_VISIBLE_KEY = "routeSequenceLayerVisible";
 const ROUTE_SEQUENCE_FIELD_KEY = "routeSequenceField";
 const ROUTE_SEQUENCE_FIELD_OPTIONS = Object.freeze(["NEWSEQ", "SEQNO"]);
+const ROUTE_SEQUENCE_NAV_SKIP_COUNT = 5;
 let layerManagerOrderTop = [];
 let layerManagerSelectableState = {};
 const sequenceLayerByRouteDay = new Map();
@@ -8824,9 +8831,14 @@ const sequenceLayerState = {
   routeDayCount: 0,
   segmentCount: 0,
   arrowCount: 0,
+  stopCount: 0,
   sourceField: "NEWSEQ",
   lastRunAt: 0
 };
+let sequenceLayerNavigationRecords = [];
+let sequenceLayerActiveRecordKey = "";
+let sequenceLayerActiveRouteDayKey = "";
+let sequenceLayerFocusMarker = null;
 // ===== DELIVERED STOPS LAYER =====
 
 function layerManagerDaySortRank(value) {
@@ -9246,6 +9258,370 @@ function parseRouteSequenceLayerValue(value) {
   return match ? Number(match[0]) : NaN;
 }
 
+function normalizeSequenceLayerCssColor(value, fallback = "#ffd54a") {
+  const text = String(value || "").trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(text)) return text;
+  if (/^[a-z][a-z0-9-]*\([\d\s.,%+-]+\)$/i.test(text)) return text;
+  return fallback;
+}
+
+function buildSequenceFocusIcon(colorValue) {
+  const color = normalizeSequenceLayerCssColor(colorValue);
+  return L.divIcon({
+    className: "sequence-focus-marker",
+    html: `
+      <span class="sequence-focus-pulse" style="--sequence-focus-color:${color};">
+        <span class="sequence-focus-core"></span>
+      </span>
+    `,
+    iconSize: [42, 42],
+    iconAnchor: [21, 21]
+  });
+}
+
+function removeSequenceNavigationFocusMarker() {
+  if (!sequenceLayerFocusMarker) return;
+  try {
+    map.removeLayer(sequenceLayerFocusMarker);
+  } catch (_) {}
+  sequenceLayerFocusMarker = null;
+}
+
+function formatSequenceNavigationValue(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  const rounded = Math.round(num);
+  if (Math.abs(num - rounded) < 1e-6) return rounded.toLocaleString();
+  return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function getSequenceNavigationRouteDayLabel(routeDayKey) {
+  const [routeToken = "", dayToken = ""] = String(routeDayKey || "").split("|");
+  const normalizedDay = normalizeDayToken(dayToken);
+  const dayLabel = dayName(normalizedDay) || dayToken || "No Day";
+  return `Route ${routeToken || "Unassigned"} | ${dayLabel}`;
+}
+
+function getSequenceNavigationRecordKey(record, fallbackIndex = 0) {
+  const routeDayKey = String(record?.routeDayKey || "");
+  const rowId = Number(record?.rowId);
+  const sequenceValue = Number(record?.sequence);
+  const rowToken = Number.isFinite(rowId) ? `row:${rowId}` : `idx:${fallbackIndex}`;
+  const sequenceToken = Number.isFinite(sequenceValue) ? `seq:${sequenceValue}` : "seq:";
+  return `${routeDayKey}|${rowToken}|${sequenceToken}`;
+}
+
+function setSequenceNavigationRecords(records) {
+  const nextRecords = (Array.isArray(records) ? records : [])
+    .map((record, index) => {
+      const layer = record?.layer || null;
+      const latLng = record?.latLng || getLayerLatLng(layer);
+      const routeDayKey = String(record?.routeDayKey || "");
+      if (!routeDayKey || !layer || !latLng) return null;
+      const rowId = Number(record?.rowId);
+      const sequenceValue = Number(record?.sequence);
+      const normalized = {
+        routeDayKey,
+        layer,
+        latLng,
+        rowId: Number.isFinite(rowId) ? rowId : NaN,
+        sequence: Number.isFinite(sequenceValue) ? sequenceValue : NaN,
+        orderIndex: index
+      };
+      normalized.navKey = getSequenceNavigationRecordKey(normalized, index);
+      return normalized;
+    })
+    .filter(Boolean);
+
+  sequenceLayerNavigationRecords = nextRecords;
+  sequenceLayerState.stopCount = nextRecords.length;
+
+  if (sequenceLayerActiveRecordKey && !nextRecords.some(record => record.navKey === sequenceLayerActiveRecordKey)) {
+    sequenceLayerActiveRecordKey = "";
+    removeSequenceNavigationFocusMarker();
+  }
+  if (sequenceLayerActiveRouteDayKey && !nextRecords.some(record => record.routeDayKey === sequenceLayerActiveRouteDayKey)) {
+    sequenceLayerActiveRouteDayKey = "";
+  }
+
+  syncSequenceNavigationUi();
+}
+
+function getVisibleSequenceNavigationRecords() {
+  return sequenceLayerNavigationRecords.filter(record => {
+    if (!record?.routeDayKey || !record.layer) return false;
+    if (!Object.prototype.hasOwnProperty.call(routeDayGroups, record.routeDayKey)) return false;
+    return map.hasLayer(record.layer);
+  });
+}
+
+function getSequenceNavigationContext() {
+  const visibleRecords = getVisibleSequenceNavigationRecords();
+  const activeRecord = visibleRecords.find(record => record.navKey === sequenceLayerActiveRecordKey) || null;
+  if (activeRecord?.routeDayKey) {
+    sequenceLayerActiveRouteDayKey = activeRecord.routeDayKey;
+  }
+
+  let routeDayKey = String(sequenceLayerActiveRouteDayKey || "");
+  let scopedRecords = routeDayKey
+    ? visibleRecords.filter(record => record.routeDayKey === routeDayKey)
+    : [];
+
+  if (routeDayKey && !scopedRecords.length) {
+    routeDayKey = "";
+    sequenceLayerActiveRouteDayKey = "";
+    scopedRecords = visibleRecords;
+  }
+
+  if (!scopedRecords.length) {
+    scopedRecords = visibleRecords;
+  }
+
+  return {
+    visibleRecords,
+    scopedRecords,
+    routeDayKey,
+    activeIndex: scopedRecords.findIndex(record => record.navKey === sequenceLayerActiveRecordKey)
+  };
+}
+
+function formatSequenceNavigationInputValue(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "";
+  const rounded = Math.round(num);
+  if (Math.abs(num - rounded) < 1e-6) return String(rounded);
+  return String(Number(num.toFixed(2)));
+}
+
+function clearSequenceNavigationFocus(options = {}) {
+  sequenceLayerActiveRecordKey = "";
+  sequenceLayerActiveRouteDayKey = "";
+  removeSequenceNavigationFocusMarker();
+  if (!options || options.sync !== false) {
+    syncSequenceNavigationUi();
+  }
+}
+
+function syncSequenceNavigationUi(message = "") {
+  const firstBtn = document.getElementById("sequenceLayerFirstRecordBtn");
+  const skipPrevBtn = document.getElementById("sequenceLayerSkipPrevRecordBtn");
+  const prevBtn = document.getElementById("sequenceLayerPrevRecordBtn");
+  const nextBtn = document.getElementById("sequenceLayerNextRecordBtn");
+  const skipNextBtn = document.getElementById("sequenceLayerSkipNextRecordBtn");
+  const lastBtn = document.getElementById("sequenceLayerLastRecordBtn");
+  const goBtn = document.getElementById("sequenceLayerGoSequenceBtn");
+  const sequenceInput = document.getElementById("sequenceLayerSequenceInput");
+  const routeDayNode = document.getElementById("sequenceLayerNavRouteDay");
+  const statusNode = document.getElementById("sequenceLayerNavStatus");
+  if (!firstBtn && !prevBtn && !nextBtn && !lastBtn && !statusNode) return;
+
+  const layerEnabled = !!document.getElementById("sequenceLayerEnabled")?.checked;
+  const context = getSequenceNavigationContext();
+  const visibleRecords = context.visibleRecords;
+  const scopedRecords = context.scopedRecords;
+  let activeIndex = context.activeIndex;
+
+  if (!layerEnabled && (sequenceLayerActiveRecordKey || sequenceLayerActiveRouteDayKey)) {
+    sequenceLayerActiveRecordKey = "";
+    sequenceLayerActiveRouteDayKey = "";
+    removeSequenceNavigationFocusMarker();
+    activeIndex = -1;
+  }
+
+  if (sequenceLayerActiveRecordKey && activeIndex < 0) {
+    sequenceLayerActiveRecordKey = "";
+    removeSequenceNavigationFocusMarker();
+    activeIndex = -1;
+  }
+
+  const routeDayKey = layerEnabled ? String(sequenceLayerActiveRouteDayKey || context.routeDayKey || "") : "";
+  const activeRecord = activeIndex >= 0 ? scopedRecords[activeIndex] : null;
+  const canNavigate = layerEnabled && scopedRecords.length > 0;
+  const hasActiveRecord = activeIndex >= 0;
+  const atFirst = hasActiveRecord && activeIndex <= 0;
+  const atLast = hasActiveRecord && activeIndex >= scopedRecords.length - 1;
+  const canGoToTypedSequence = canNavigate && !!routeDayKey;
+
+  if (firstBtn) firstBtn.disabled = !canNavigate || atFirst;
+  if (skipPrevBtn) skipPrevBtn.disabled = !canNavigate || !hasActiveRecord || atFirst;
+  if (prevBtn) prevBtn.disabled = !canNavigate || !hasActiveRecord || atFirst;
+  if (nextBtn) nextBtn.disabled = !canNavigate || atLast;
+  if (skipNextBtn) skipNextBtn.disabled = !canNavigate || !hasActiveRecord || atLast;
+  if (lastBtn) lastBtn.disabled = !canNavigate || atLast;
+  if (goBtn) goBtn.disabled = !canGoToTypedSequence;
+  if (sequenceInput) {
+    sequenceInput.disabled = !canGoToTypedSequence;
+    if (document.activeElement !== sequenceInput) {
+      sequenceInput.value = activeRecord ? formatSequenceNavigationInputValue(activeRecord.sequence) : "";
+    }
+  }
+  if (routeDayNode) {
+    routeDayNode.textContent = routeDayKey
+      ? getSequenceNavigationRouteDayLabel(routeDayKey)
+      : "No Route+Day selected";
+  }
+
+  if (!statusNode) return;
+  if (message) {
+    statusNode.textContent = String(message);
+    return;
+  }
+
+  if (!layerEnabled) {
+    statusNode.textContent = "Turn on the layer to step through records.";
+    return;
+  }
+  if (!sequenceLayerNavigationRecords.length) {
+    statusNode.textContent = "No sequenced records ready.";
+    return;
+  }
+  if (!visibleRecords.length) {
+    statusNode.textContent = "No visible sequenced records.";
+    return;
+  }
+  if (activeIndex >= 0) {
+    const record = scopedRecords[activeIndex];
+    statusNode.textContent = `${(activeIndex + 1).toLocaleString()} / ${scopedRecords.length.toLocaleString()} - Seq ${formatSequenceNavigationValue(record.sequence)}`;
+    return;
+  }
+  statusNode.textContent = routeDayKey
+    ? `${scopedRecords.length.toLocaleString()} visible sequenced record(s) in this Route+Day.`
+    : `${visibleRecords.length.toLocaleString()} visible sequenced record(s).`;
+}
+
+function focusSequenceNavigationRecord(record) {
+  if (!record) return false;
+  const latLng = getLayerLatLng(record.layer) || record.latLng;
+  if (!latLng) return false;
+
+  const hasActiveSequenceRecord = !!sequenceLayerActiveRecordKey;
+  sequenceLayerActiveRecordKey = record.navKey;
+  sequenceLayerActiveRouteDayKey = record.routeDayKey;
+  removeSequenceNavigationFocusMarker();
+  sequenceLayerFocusMarker = L.marker(latLng, {
+    pane: SEQUENCE_FOCUS_PANE,
+    icon: buildSequenceFocusIcon(getSequenceLayerLineColor(record.routeDayKey)),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 4000
+  }).addTo(map);
+
+  if (hasActiveSequenceRecord) {
+    map.panTo(latLng, { animate: true });
+  } else {
+    const targetZoom = Math.max(Number(map.getZoom()) || 0, 17);
+    map.setView(latLng, targetZoom, { animate: true });
+  }
+  try { record.layer.bringToFront?.(); } catch (_) {}
+  openSequenceNavigationPopup(record.layer);
+  syncSequenceNavigationUi();
+  return true;
+}
+
+function openSequenceNavigationPopup(layer) {
+  if (!layer || typeof layer.openPopup !== "function") return;
+  const popup = typeof layer.getPopup === "function" ? layer.getPopup() : null;
+  const popupOptions = popup?.options;
+  const previousAutoPan = popupOptions ? popupOptions.autoPan : undefined;
+  if (popupOptions) popupOptions.autoPan = false;
+  layer.openPopup();
+  if (popupOptions) popupOptions.autoPan = previousAutoPan;
+}
+
+function focusSequenceNavigationByIndex(targetIndex, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const context = getSequenceNavigationContext();
+  const records = context.scopedRecords;
+  if (!records.length) {
+    syncSequenceNavigationUi("No visible sequenced records.");
+    return false;
+  }
+
+  const index = Math.max(0, Math.min(records.length - 1, Math.round(Number(targetIndex) || 0)));
+  const moved = focusSequenceNavigationRecord(records[index]);
+  if (moved && opts.message) syncSequenceNavigationUi(opts.message);
+  return moved;
+}
+
+function moveSequenceNavigationByOffset(offset) {
+  const context = getSequenceNavigationContext();
+  const records = context.scopedRecords;
+  if (!records.length) {
+    syncSequenceNavigationUi("No visible sequenced records.");
+    return false;
+  }
+
+  const step = Math.round(Number(offset) || 0);
+  const activeIndex = Number(context.activeIndex);
+  const targetIndex = activeIndex < 0
+    ? (step < 0 ? records.length - 1 : 0)
+    : activeIndex + step;
+
+  if (targetIndex < 0 || targetIndex >= records.length) {
+    syncSequenceNavigationUi(step < 0 ? "Already at the first sequenced record." : "Already at the last sequenced record.");
+    return false;
+  }
+
+  return focusSequenceNavigationByIndex(targetIndex);
+}
+
+function stepSequenceNavigation(direction) {
+  return moveSequenceNavigationByOffset(Number(direction) < 0 ? -1 : 1);
+}
+
+function jumpSequenceNavigationToEdge(edge) {
+  const context = getSequenceNavigationContext();
+  const records = context.scopedRecords;
+  if (!records.length) {
+    syncSequenceNavigationUi("No visible sequenced records.");
+    return false;
+  }
+  const targetIndex = edge === "last" ? records.length - 1 : 0;
+  return focusSequenceNavigationByIndex(targetIndex);
+}
+
+function goToSequenceNavigationValue() {
+  const sequenceInput = document.getElementById("sequenceLayerSequenceInput");
+  const context = getSequenceNavigationContext();
+  const routeDayKey = String(sequenceLayerActiveRouteDayKey || context.routeDayKey || "");
+  const records = routeDayKey
+    ? context.visibleRecords.filter(record => record.routeDayKey === routeDayKey)
+    : [];
+
+  if (!routeDayKey || !records.length) {
+    syncSequenceNavigationUi("Select a sequenced record before typing a Route+Day sequence.");
+    return false;
+  }
+
+  const targetSequence = parseRouteSequenceLayerValue(sequenceInput?.value);
+  if (!Number.isFinite(targetSequence)) {
+    syncSequenceNavigationUi("Enter a sequence number for the current Route+Day.");
+    return false;
+  }
+
+  const exactRecord = records.find(record => Math.abs(Number(record.sequence) - targetSequence) < 1e-6);
+  if (exactRecord) return focusSequenceNavigationRecord(exactRecord);
+
+  let nearestRecord = null;
+  let nearestDistance = Infinity;
+  records.forEach(record => {
+    const distance = Math.abs(Number(record.sequence) - targetSequence);
+    if (!Number.isFinite(distance) || distance >= nearestDistance) return;
+    nearestRecord = record;
+    nearestDistance = distance;
+  });
+
+  if (!nearestRecord) {
+    syncSequenceNavigationUi(`Sequence ${formatSequenceNavigationValue(targetSequence)} was not found.`);
+    return false;
+  }
+
+  const message = `Seq ${formatSequenceNavigationValue(targetSequence)} not found; showing nearest Seq ${formatSequenceNavigationValue(nearestRecord.sequence)}.`;
+  focusSequenceNavigationRecord(nearestRecord);
+  syncSequenceNavigationUi(message);
+  return true;
+}
+
 function clearSequenceLayerData(options = {}) {
   sequenceLayerByRouteDay.forEach(layerGroup => {
     try { map.removeLayer(layerGroup); } catch (_) {}
@@ -9254,10 +9630,14 @@ function clearSequenceLayerData(options = {}) {
   sequenceLayerState.routeDayCount = 0;
   sequenceLayerState.segmentCount = 0;
   sequenceLayerState.arrowCount = 0;
+  sequenceLayerState.stopCount = 0;
   sequenceLayerState.sourceField = getRouteSequenceSelectedField();
   sequenceLayerState.lastRunAt = 0;
+  setSequenceNavigationRecords([]);
+  clearSequenceNavigationFocus({ sync: false });
   if (!options || options.silent !== true) {
     updateSequenceLayerStatus();
+    syncSequenceNavigationUi();
   }
 }
 
@@ -9277,6 +9657,7 @@ function syncSequenceLayerVisibilityOnMap() {
   });
 
   updateSequenceLayerStatus();
+  syncSequenceNavigationUi();
 }
 
 function updateSequenceLayerStatus(message = "") {
@@ -9327,6 +9708,7 @@ function rebuildSequenceLayerFromUploadedRows(options = {}) {
   let arrowCount = 0;
   let sequencedStopCount = 0;
   let duplicateSequenceCount = 0;
+  const navigationRecords = [];
   const fieldLabel = formatRouteSequenceFieldLabel(sourceField);
 
   routeDayEntries.forEach(([routeDayKey, group]) => {
@@ -9358,6 +9740,17 @@ function rebuildSequenceLayerFromUploadedRows(options = {}) {
     stops.sort((a, b) => {
       if (a.sequence !== b.sequence) return a.sequence - b.sequence;
       return a.rowId - b.rowId;
+    });
+
+    stops.forEach((stop, stopIndex) => {
+      navigationRecords.push({
+        routeDayKey,
+        layer: stop.layer,
+        rowId: stop.rowId,
+        sequence: stop.sequence,
+        latLng: stop.latLng,
+        orderIndex: stopIndex
+      });
     });
 
     if (stops.length < 2) return;
@@ -9415,6 +9808,7 @@ function rebuildSequenceLayerFromUploadedRows(options = {}) {
   sequenceLayerState.arrowCount = arrowCount;
   sequenceLayerState.sourceField = sourceField;
   sequenceLayerState.lastRunAt = Date.now();
+  setSequenceNavigationRecords(navigationRecords);
 
   syncSequenceLayerVisibilityOnMap();
   if (!segmentCount) {
@@ -9444,6 +9838,7 @@ function rebuildSequenceLayerFromPlans(plans) {
   const maxArrowCount = 7000;
   let segmentCount = 0;
   let arrowCount = 0;
+  const navigationRecords = [];
 
   entries.forEach(plan => {
     const routeDayKey = String(plan?.routeDayKey || "");
@@ -9451,7 +9846,7 @@ function rebuildSequenceLayerFromPlans(plans) {
     const visits = (Array.isArray(plan?.stopVisits) ? plan.stopVisits : [])
       .slice()
       .sort((a, b) => Number(a?.sequence || 0) - Number(b?.sequence || 0));
-    if (visits.length < 2) return;
+    if (!visits.length) return;
 
     const sourceLayers = Array.isArray(routeDayGroups[routeDayKey]?.layers)
       ? routeDayGroups[routeDayKey].layers
@@ -9459,14 +9854,33 @@ function rebuildSequenceLayerFromPlans(plans) {
     if (!sourceLayers.length) return;
 
     const latLngByRowId = new Map();
+    const layerByRowId = new Map();
     sourceLayers.forEach(layer => {
       const rowId = Number(layer?._rowId);
       if (!Number.isFinite(rowId)) return;
       const ll = getLayerLatLng(layer);
       if (!ll) return;
       latLngByRowId.set(rowId, ll);
+      layerByRowId.set(rowId, layer);
     });
     if (!latLngByRowId.size) return;
+
+    visits.forEach((visit, visitIndex) => {
+      const rowId = Number(visit?.rowId);
+      const ll = latLngByRowId.get(rowId);
+      const layer = layerByRowId.get(rowId);
+      if (!ll || !layer) return;
+      navigationRecords.push({
+        routeDayKey,
+        layer,
+        rowId,
+        sequence: Number(visit?.sequence) || visitIndex + 1,
+        latLng: ll,
+        orderIndex: visitIndex
+      });
+    });
+
+    if (visits.length < 2) return;
 
     const eventPoints = (Array.isArray(plan?.events) ? plan.events : [])
       .filter(event => Number.isFinite(Number(event?.lat)) && Number.isFinite(Number(event?.lon)))
@@ -9552,7 +9966,9 @@ function rebuildSequenceLayerFromPlans(plans) {
   sequenceLayerState.routeDayCount = sequenceLayerByRouteDay.size;
   sequenceLayerState.segmentCount = segmentCount;
   sequenceLayerState.arrowCount = arrowCount;
+  sequenceLayerState.sourceField = "plans";
   sequenceLayerState.lastRunAt = Date.now();
+  setSequenceNavigationRecords(navigationRecords);
 
   syncSequenceLayerVisibilityOnMap();
 }
@@ -9581,6 +9997,14 @@ function initSequenceLayerControls() {
   const masterToggle = document.getElementById("sequenceLayerEnabled");
   const fieldSelect = document.getElementById("sequenceLayerFieldSelect");
   const statusNode = document.getElementById("sequenceLayerStatus");
+  const firstRecordBtn = document.getElementById("sequenceLayerFirstRecordBtn");
+  const skipPrevRecordBtn = document.getElementById("sequenceLayerSkipPrevRecordBtn");
+  const prevRecordBtn = document.getElementById("sequenceLayerPrevRecordBtn");
+  const sequenceInput = document.getElementById("sequenceLayerSequenceInput");
+  const goSequenceBtn = document.getElementById("sequenceLayerGoSequenceBtn");
+  const nextRecordBtn = document.getElementById("sequenceLayerNextRecordBtn");
+  const skipNextRecordBtn = document.getElementById("sequenceLayerSkipNextRecordBtn");
+  const lastRecordBtn = document.getElementById("sequenceLayerLastRecordBtn");
   if (!toggleHeader || !content || !masterToggle || !fieldSelect || !statusNode) return;
   if (toggleHeader.dataset.sequenceLayerBound === "1") return;
   toggleHeader.dataset.sequenceLayerBound = "1";
@@ -9606,11 +10030,46 @@ function initSequenceLayerControls() {
     rebuildSequenceLayerFromUploadedRows({ sourceField: fieldSelect.value });
   });
 
+  firstRecordBtn?.addEventListener("click", () => {
+    jumpSequenceNavigationToEdge("first");
+  });
+
+  skipPrevRecordBtn?.addEventListener("click", () => {
+    moveSequenceNavigationByOffset(-ROUTE_SEQUENCE_NAV_SKIP_COUNT);
+  });
+
+  prevRecordBtn?.addEventListener("click", () => {
+    stepSequenceNavigation(-1);
+  });
+
+  goSequenceBtn?.addEventListener("click", () => {
+    goToSequenceNavigationValue();
+  });
+
+  sequenceInput?.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    goToSequenceNavigationValue();
+  });
+
+  nextRecordBtn?.addEventListener("click", () => {
+    stepSequenceNavigation(1);
+  });
+
+  skipNextRecordBtn?.addEventListener("click", () => {
+    moveSequenceNavigationByOffset(ROUTE_SEQUENCE_NAV_SKIP_COUNT);
+  });
+
+  lastRecordBtn?.addEventListener("click", () => {
+    jumpSequenceNavigationToEdge("last");
+  });
+
   const shouldShow = false;
   masterToggle.checked = shouldShow;
   storageSet(ROUTE_SEQUENCE_LAYER_VISIBLE_KEY, "off");
   setSequenceLayerEnabled(shouldShow, { persist: false });
   updateSequenceLayerStatus();
+  syncSequenceNavigationUi();
 }
 
 function multiDaySortRank(dayToken) {
