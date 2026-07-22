@@ -9355,6 +9355,97 @@ function getVisibleSequenceNavigationRecords() {
   });
 }
 
+function isSequenceLayerNavigationEnabled() {
+  return !!document.getElementById("sequenceLayerEnabled")?.checked;
+}
+
+function getRouteDayKeyForRecordLayer(layer) {
+  const routeToken = String(layer?._routeToken ?? "").trim();
+  const dayToken = String(layer?._dayToken ?? "").trim();
+  const directKey = routeToken || dayToken
+    ? `${routeToken || "Unassigned"}|${dayToken || "No Day"}`
+    : "";
+  if (directKey && Object.prototype.hasOwnProperty.call(routeDayGroups, directKey)) return directKey;
+
+  for (const [key, group] of Object.entries(routeDayGroups)) {
+    const layers = Array.isArray(group?.layers) ? group.layers : [];
+    if (layers.includes(layer)) return key;
+  }
+  return "";
+}
+
+function getSequenceNavigationRecordForLayer(layer, routeDayKey = "", sequenceValue = NaN) {
+  if (!layer) return null;
+  const rowId = Number(layer?._rowId);
+  const hasSequenceValue = Number.isFinite(Number(sequenceValue));
+  const exactLayerRecord = sequenceLayerNavigationRecords.find(record => {
+    if (!record) return false;
+    if (record.layer !== layer) return false;
+    if (routeDayKey && record.routeDayKey !== routeDayKey) return false;
+    if (!hasSequenceValue) return true;
+    return Math.abs(Number(record.sequence) - Number(sequenceValue)) < 1e-6;
+  });
+  if (exactLayerRecord) return exactLayerRecord;
+
+  return sequenceLayerNavigationRecords.find(record => {
+    if (!record) return false;
+    if (!routeDayKey || record.routeDayKey !== routeDayKey) return false;
+    if (Number.isFinite(rowId) && Number(record.rowId) === rowId) return true;
+    return hasSequenceValue && Math.abs(Number(record.sequence) - Number(sequenceValue)) < 1e-6;
+  }) || null;
+}
+
+function showSequenceNavigationFocusAtLayer(layer, routeDayKey) {
+  const latLng = getLayerLatLng(layer);
+  if (!latLng) return false;
+  removeSequenceNavigationFocusMarker();
+  sequenceLayerFocusMarker = L.marker(latLng, {
+    pane: SEQUENCE_FOCUS_PANE,
+    icon: buildSequenceFocusIcon(getSequenceLayerLineColor(routeDayKey)),
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: 4000
+  }).addTo(map);
+  return true;
+}
+
+function activateSequenceNavigationFromRecordLayer(layer) {
+  if (!isSequenceLayerNavigationEnabled()) return false;
+  const selectedField = getRouteSequenceSelectedField();
+  if (sequenceLayerState.sourceField !== selectedField || !sequenceLayerNavigationRecords.length) {
+    rebuildSequenceLayerFromUploadedRows({ sourceField: selectedField });
+  }
+
+  const routeDayKey = getRouteDayKeyForRecordLayer(layer);
+  if (!routeDayKey) return false;
+
+  const clickedSequence = parseRouteSequenceLayerValue(layer?._rowRef?.[selectedField]);
+  const record = getSequenceNavigationRecordForLayer(layer, routeDayKey, clickedSequence);
+  sequenceLayerActiveRouteDayKey = routeDayKey;
+  sequenceLayerActiveRecordKey = record?.navKey || "";
+  showSequenceNavigationFocusAtLayer(layer, routeDayKey);
+  if (record) {
+    syncSequenceNavigationUi();
+  } else if (Number.isFinite(clickedSequence)) {
+    syncSequenceNavigationUi(`Seq ${formatSequenceNavigationValue(clickedSequence)} is not available in ${formatRouteSequenceFieldLabel(selectedField)} for this Route+Day.`);
+  } else {
+    syncSequenceNavigationUi(`This record does not have a usable ${formatRouteSequenceFieldLabel(selectedField)} value.`);
+  }
+  return true;
+}
+
+function bindRecordSequenceNavigationClick(layer) {
+  if (!layer || typeof layer.on !== "function") return;
+  if (layer._sequenceNavigationClickBound === true) return;
+  layer._sequenceNavigationClickBound = true;
+  layer.on("click", event => {
+    if (event?.originalEvent && L?.DomEvent?.stopPropagation) {
+      L.DomEvent.stopPropagation(event.originalEvent);
+    }
+    activateSequenceNavigationFromRecordLayer(layer);
+  });
+}
+
 function getSequenceNavigationContext() {
   const visibleRecords = getVisibleSequenceNavigationRecords();
   const activeRecord = visibleRecords.find(record => record.navKey === sequenceLayerActiveRecordKey) || null;
@@ -10062,6 +10153,12 @@ function initSequenceLayerControls() {
 
   lastRecordBtn?.addEventListener("click", () => {
     jumpSequenceNavigationToEdge("last");
+  });
+
+  map.on("click", () => {
+    if (!isSequenceLayerNavigationEnabled()) return;
+    if (!sequenceLayerActiveRecordKey && !sequenceLayerActiveRouteDayKey && !sequenceLayerFocusMarker) return;
+    clearSequenceNavigationFocus();
   });
 
   const shouldShow = false;
@@ -11433,6 +11530,7 @@ function refreshRouteDayGroupsFromCurrentRows() {
       fillColor: symbol.color
     });
     syncRecordPopupContent(marker);
+    bindRecordSequenceNavigationClick(marker);
 
     if (!nextGroups[key]) nextGroups[key] = { layers: [] };
     nextGroups[key].layers.push(marker);
@@ -16837,7 +16935,10 @@ function buildRouteSequencerFormatHintText(demandField, serviceField, outputFiel
     mapped.totalMinutes,
     mapped.dumpVisits
   ].join(", ");
-  return `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75). ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Service Stops Before Deadhead can prioritize servicing additional stops before deadheading to dump when capacity allows. Street Attribute Defaults apply class-based U-turn restrictions, meander/same-side penalties, and cross-penalty time. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying capacity, dump, depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
+  const demandText = String(demandField || "").trim()
+    ? `${demandLabel}: use numeric tons (example: 0.5, 3, 12.75).`
+    : "No Demand Field selected: demand, cumulative load, truck capacity, and capacity-based dump calculations will not be calculated for this sequence.";
+  return `${demandText} ${serviceLabel}: use minutes as number (2, 7.5) or clock text (MM:SS or HH:MM:SS, example 05:30). Speed class field defaults to speed_cat. Stop-to-stop travel uses Service Speed; deadhead travel to dumps/start/end uses Driving Speed. Service Stops Before Deadhead can prioritize servicing additional stops before deadheading to dump when capacity allows. Street Attribute Defaults apply class-based U-turn restrictions, meander/same-side penalties, and cross-penalty time, reported as Penalty/Other time. Driver breaks: optional comma-separated MM:SS values (example 15:00, 30:00). Sequencing is solved per Route+Day as a single route. Time at Start/End is route-level time in MM:SS. Sequence increment: ${increment}. Evaluate Sequence keeps stop order from existing sequence values while still applying depot, trip, and metric logic. Auto Sequence overwrites output fields: ${outputList}.`;
 }
 
 function normalizeRouteSequencerText(value) {
@@ -18845,6 +18946,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
   const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
   const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(options.meanderOverrideDefaults);
+  const demandCalculationEnabled = options.demandCalculationEnabled !== false;
   if (requireNetworkOnly && (!graph || !(graph.nodes instanceof Map) || !graph.nodes.size)) {
     return null;
   }
@@ -18885,7 +18987,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     const adjustment = normalizeRouteSequencerCandidateAdjustment(pickResult?.adjustment);
     const baseDriveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
     const drivePenaltyMinutes = Math.max(0, Number(adjustment.driveMinutesDelta) || 0);
-    const driveMinutes = baseDriveMinutes + drivePenaltyMinutes;
+    const driveMinutes = baseDriveMinutes;
     const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
     totalDriveMinutes += driveMinutes;
     totalDriveMiles += driveMiles;
@@ -18898,13 +19000,14 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
   };
 
   const appendStopVisit = (stopPoint, pickResult) => {
-    const { driveMinutes, driveMiles, adjustment } = applyDriveLeg(pickResult);
+    const { driveMinutes, driveMiles, drivePenaltyMinutes, adjustment } = applyDriveLeg(pickResult);
     const demand = Math.max(0, Number(stopPoint?.demand) || 0);
     const baseServiceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
     const servicePenaltyMinutes = Math.max(0, Number(adjustment?.serviceMinutesDelta) || 0);
     const otherPenaltyMinutes = Math.max(0, Number(adjustment?.otherMinutesDelta) || 0);
-    const serviceMinutes = baseServiceMinutes + servicePenaltyMinutes;
-    if (otherPenaltyMinutes > 0) totalOtherMinutes += otherPenaltyMinutes;
+    const serviceMinutes = baseServiceMinutes;
+    const routingPenaltyMinutes = drivePenaltyMinutes + servicePenaltyMinutes + otherPenaltyMinutes;
+    if (routingPenaltyMinutes > 0) totalOtherMinutes += routingPenaltyMinutes;
     currentLoad += demand;
     totalServiceMinutes += serviceMinutes;
     const sequence = stopVisits.length + 1;
@@ -18921,9 +19024,11 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
-      otherMinutes: otherPenaltyMinutes,
+      servicePenaltyMinutes,
+      drivePenaltyMinutes,
+      otherMinutes: routingPenaltyMinutes,
       penaltyNotes,
-      totalMinutes: driveMinutes + serviceMinutes + otherPenaltyMinutes
+      totalMinutes: driveMinutes + serviceMinutes + routingPenaltyMinutes
     };
     stopVisits.push(visit);
     events.push({
@@ -18936,7 +19041,9 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
-      otherMinutes: otherPenaltyMinutes,
+      servicePenaltyMinutes,
+      drivePenaltyMinutes,
+      otherMinutes: routingPenaltyMinutes,
       penaltyNotes,
       cumulativeLoad: visit.cumulativeLoad,
       lat: Number(stopPoint?.lat),
@@ -19241,6 +19348,7 @@ function solveRouteDaySequencingPlan(routeDayKey, stops, options = {}) {
     totalFacilityMinutes,
     totalMinutes: totalDriveMinutes + totalServiceMinutes + totalFacilityMinutes + totalOtherMinutes,
     capacityTons: Number.isFinite(capacityTons) && capacityTons > 0 ? capacityTons : null,
+    demandCalculationEnabled,
     networkLegs,
     fallbackLegs
   };
@@ -19282,6 +19390,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
   const timeAtEndMinutes = Math.max(0, parseRouteSequencerMinutesValue(options.timeAtEndMinutes, 0));
   const streetAttributeDefaults = normalizeRouteSequencerStreetAttributeDefaults(options.streetAttributeDefaults);
   const meanderOverrideDefaults = normalizeRouteSequencerMeanderOverrideDefaults(options.meanderOverrideDefaults);
+  const demandCalculationEnabled = options.demandCalculationEnabled !== false;
   if (requireNetworkOnly && (!graph || !(graph.nodes instanceof Map) || !graph.nodes.size)) {
     return null;
   }
@@ -19314,7 +19423,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
     const adjustment = normalizeRouteSequencerCandidateAdjustment(pickResult?.adjustment);
     const baseDriveMinutes = Math.max(0, Number(pickResult?.minutes) || 0);
     const drivePenaltyMinutes = Math.max(0, Number(adjustment?.driveMinutesDelta) || 0);
-    const driveMinutes = baseDriveMinutes + drivePenaltyMinutes;
+    const driveMinutes = baseDriveMinutes;
     const driveMiles = Math.max(0, Number(pickResult?.miles) || 0);
     totalDriveMinutes += driveMinutes;
     totalDriveMiles += driveMiles;
@@ -19462,13 +19571,14 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
       return;
     }
 
-    const { driveMinutes, driveMiles, adjustment } = applyDriveLeg(pick);
+    const { driveMinutes, driveMiles, drivePenaltyMinutes, adjustment } = applyDriveLeg(pick);
     const demand = Math.max(0, Number(stopPoint?.demand) || 0);
     const baseServiceMinutes = Math.max(0, Number(stopPoint?.serviceMinutes) || 0);
     const servicePenaltyMinutes = Math.max(0, Number(adjustment?.serviceMinutesDelta) || 0);
     const otherPenaltyMinutes = Math.max(0, Number(adjustment?.otherMinutesDelta) || 0);
-    const serviceMinutes = baseServiceMinutes + servicePenaltyMinutes;
-    if (otherPenaltyMinutes > 0) totalOtherMinutes += otherPenaltyMinutes;
+    const serviceMinutes = baseServiceMinutes;
+    const routingPenaltyMinutes = drivePenaltyMinutes + servicePenaltyMinutes + otherPenaltyMinutes;
+    if (routingPenaltyMinutes > 0) totalOtherMinutes += routingPenaltyMinutes;
     currentLoad += demand;
     totalServiceMinutes += serviceMinutes;
 
@@ -19488,11 +19598,13 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
-      otherMinutes: otherPenaltyMinutes,
+      servicePenaltyMinutes,
+      drivePenaltyMinutes,
+      otherMinutes: routingPenaltyMinutes,
       penaltyNotes: Array.isArray(adjustment?.notes)
         ? adjustment.notes.map(note => String(note || "").trim()).filter(Boolean).join("; ")
         : "",
-      totalMinutes: driveMinutes + serviceMinutes + otherPenaltyMinutes
+      totalMinutes: driveMinutes + serviceMinutes + routingPenaltyMinutes
     };
     stopVisits.push(visit);
     events.push({
@@ -19505,7 +19617,9 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
       driveMinutes,
       driveMiles,
       serviceMinutes,
-      otherMinutes: otherPenaltyMinutes,
+      servicePenaltyMinutes,
+      drivePenaltyMinutes,
+      otherMinutes: routingPenaltyMinutes,
       penaltyNotes: visit.penaltyNotes,
       cumulativeLoad: visit.cumulativeLoad,
       lat: Number(stopPoint?.lat),
@@ -19611,6 +19725,7 @@ function solveRouteDaySequenceEvaluationPlan(routeDayKey, stops, options = {}) {
     totalFacilityMinutes,
     totalMinutes: totalDriveMinutes + totalServiceMinutes + totalFacilityMinutes + totalOtherMinutes,
     capacityTons: Number.isFinite(capacityTons) && capacityTons > 0 ? capacityTons : null,
+    demandCalculationEnabled,
     networkLegs,
     fallbackLegs
   };
@@ -19623,6 +19738,7 @@ function applyRouteSequencerPlansToRows(plans, outputFieldMapping, options = {})
   ensureExistBackupColumns(rows);
   const outputFields = normalizeRouteSequencerOutputFields(outputFieldMapping || getRouteSequencerActiveOutputFields());
   const sequenceIncrement = normalizeRouteSequencerSequenceIncrement(options?.sequenceIncrement, 1);
+  const writeCumulativeLoad = options?.writeCumulativeLoad !== false;
   const resetFieldNames = [...new Set(Object.values(outputFields).map(name => String(name || "").trim()).filter(Boolean))];
   const idsToReset = new Set();
   Object.values(routeDayGroups).forEach(group => {
@@ -19663,9 +19779,11 @@ function applyRouteSequencerPlansToRows(plans, outputFieldMapping, options = {})
       row[outputFields.sequence] = sequenceValue;
       row.SEQNO = sequenceValue;
       row[outputFields.trip] = Number(visit.trip) || "";
-      row[outputFields.cumulativeLoad] = Number.isFinite(Number(visit.cumulativeLoad))
-        ? Number(Number(visit.cumulativeLoad).toFixed(3))
-        : "";
+      if (writeCumulativeLoad) {
+        row[outputFields.cumulativeLoad] = Number.isFinite(Number(visit.cumulativeLoad))
+          ? Number(Number(visit.cumulativeLoad).toFixed(3))
+          : "";
+      }
       row[outputFields.driveMinutes] = Number.isFinite(Number(visit.driveMinutes))
         ? Number(Number(visit.driveMinutes).toFixed(2))
         : "";
@@ -19750,7 +19868,10 @@ function renderRouteSequencerResultsList(node, plans) {
     }, 0);
 
     const serviceFromStops = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.serviceMinutes) || 0), 0);
-    const demandTons = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0);
+    const demandCalculationEnabled = plan?.demandCalculationEnabled !== false;
+    const demandTons = demandCalculationEnabled
+      ? stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0)
+      : NaN;
     const driveMinutes = Math.max(0, Number(plan?.totalDriveMinutes) || 0);
     const driveMilesFromEvents = events.reduce((sum, event) => sum + Math.max(0, Number(event?.driveMiles) || 0), 0);
     const driveMiles = Number.isFinite(Number(plan?.totalDriveMiles))
@@ -19791,7 +19912,8 @@ function renderRouteSequencerResultsList(node, plans) {
       facilityMinutes: facilityMinutesResolved,
       otherMinutes,
       totalMinutes: totalMinutesResolved,
-      demandTons
+      demandTons,
+      demandCalculationEnabled
     };
   };
 
@@ -19850,10 +19972,17 @@ function renderRouteSequencerResultsList(node, plans) {
         .map(visit => Number(visit?.trip))
         .filter(value => Number.isFinite(value) && value > 0)
     ).size || 1;
-    const capacityText = Number.isFinite(Number(plan?.capacityTons))
-      ? Number(plan.capacityTons).toFixed(2)
-      : "-";
     const breakdown = computePlanTimeBreakdown(plan);
+    const capacityText = breakdown.demandCalculationEnabled
+      ? (
+        Number.isFinite(Number(plan?.capacityTons))
+          ? Number(plan.capacityTons).toFixed(2)
+          : "-"
+      )
+      : "Not used";
+    const demandText = breakdown.demandCalculationEnabled
+      ? formatNumber(breakdown.demandTons, 2)
+      : "Not calculated";
     return `
       <tr>
         <td>${escapeRouteSequencerHtml(route)}</td>
@@ -19862,7 +19991,7 @@ function renderRouteSequencerResultsList(node, plans) {
         <td>${tripCount.toLocaleString()}</td>
         <td>${dumpCount.toLocaleString()}</td>
         <td>${capacityText}</td>
-        <td>${formatNumber(breakdown.demandTons, 2)}</td>
+        <td>${demandText}</td>
         <td>${formatDurationHms(breakdown.driveMinutes)}</td>
         <td>${formatNumber(breakdown.driveMiles, 2)}</td>
         <td>${formatDurationHms(breakdown.serviceMinutes)}</td>
@@ -19897,14 +20026,14 @@ function renderRouteSequencerResultsList(node, plans) {
               <th>Break (HH:MM:SS)</th>
               <th>Start (HH:MM:SS)</th>
               <th>End (HH:MM:SS)</th>
-              <th>Other (HH:MM:SS)</th>
+              <th>Penalty/Other (HH:MM:SS)</th>
               <th>Total (HH:MM:SS)</th>
             </tr>
           </thead>
           <tbody>${summaryRowsHtml}</tbody>
         </table>
       </div>
-      <div class="route-sequencer-report-truncated">Time fields are shown as HH:MM:SS. Total = Drive + Service + Dump Facility + Break + Start + End + Other. Dump Facility time is counted on every dump visit (for example, 00:25:00 x 2 dumps = 00:50:00). Break time is route-level idle time. Drive includes travel between stops, to/from dump locations, from start facility to first stop, and from last stop to end facility. Other includes class-based penalties such as cross-penalty and U-turn penalties.</div>
+      <div class="route-sequencer-report-truncated">Time fields are shown as HH:MM:SS. Total = Drive + Service + Dump Facility + Break + Start + End + Penalty/Other. Service is only the raw stop service time from the selected service field. Dump Facility time is counted on every dump visit (for example, 00:25:00 x 2 dumps = 00:50:00). Break time is route-level idle time. Drive is base travel time between stops, to/from dump locations, from start facility to first stop, and from last stop to end facility. Penalty/Other includes class-based routing adjustments such as same-side/meander, cross-penalty, walking-only, and U-turn penalties.</div>
     </section>
   `;
 
@@ -19912,10 +20041,17 @@ function renderRouteSequencerResultsList(node, plans) {
     const key = `${plan.route || "Unassigned"} | ${plan.day || "No Day"}`;
     const stopCount = Number(plan.stopVisits?.length) || 0;
     const dumpCount = Number(plan.dumpVisits) || 0;
-    const capacityText = Number.isFinite(Number(plan.capacityTons))
-      ? `${Number(plan.capacityTons).toFixed(2)} tons`
-      : "Not set";
     const breakdown = computePlanTimeBreakdown(plan);
+    const capacityText = breakdown.demandCalculationEnabled
+      ? (
+        Number.isFinite(Number(plan.capacityTons))
+          ? `${Number(plan.capacityTons).toFixed(2)} tons`
+          : "Not set"
+      )
+      : "Not used";
+    const demandText = breakdown.demandCalculationEnabled
+      ? `${formatNumber(breakdown.demandTons, 2)} tons`
+      : "Not calculated";
     const tripCount = new Set(
       (Array.isArray(plan.stopVisits) ? plan.stopVisits : [])
         .map(visit => Number(visit?.trip))
@@ -19977,8 +20113,8 @@ function renderRouteSequencerResultsList(node, plans) {
           <td>${formatDurationHms(event?.serviceMinutes)}</td>
           <td>${formatDurationHms(event?.facilityMinutes)}</td>
           <td>${formatDurationHms(otherMinutes)}</td>
-          <td>${formatNumber(demandTons, 2, "0.00")}</td>
-          <td>${formatNumber(runningLoadTons, 2, "0.00")}</td>
+          <td>${breakdown.demandCalculationEnabled ? formatNumber(demandTons, 2, "0.00") : "-"}</td>
+          <td>${breakdown.demandCalculationEnabled ? formatNumber(runningLoadTons, 2, "0.00") : "-"}</td>
           <td>${escapeRouteSequencerHtml(formatEventNotes(event))}</td>
         </tr>
       `;
@@ -19997,7 +20133,7 @@ function renderRouteSequencerResultsList(node, plans) {
             <span>Dumps: ${dumpCount.toLocaleString()}</span>
             <span>Trips: ${tripCount.toLocaleString()}</span>
             <span>Capacity: ${escapeRouteSequencerHtml(capacityText)}</span>
-            <span>Demand: ${formatNumber(breakdown.demandTons, 2)} tons</span>
+            <span>Demand: ${escapeRouteSequencerHtml(demandText)}</span>
             <span>Drive: ${formatDurationHms(breakdown.driveMinutes)}</span>
             <span>Miles: ${formatNumber(breakdown.driveMiles, 2)} mi</span>
             <span>Service: ${formatDurationHms(breakdown.serviceMinutes)}</span>
@@ -20005,7 +20141,7 @@ function renderRouteSequencerResultsList(node, plans) {
             <span>Start: ${formatDurationHms(breakdown.startMinutes)}</span>
             <span>End: ${formatDurationHms(breakdown.endMinutes)}</span>
             <span>Dump Facility: ${formatDurationHms(breakdown.dumpFacilityMinutes)}</span>
-            <span>Other: ${formatDurationHms(breakdown.otherMinutes)}</span>
+            <span>Penalty/Other: ${formatDurationHms(breakdown.otherMinutes)}</span>
             <span>Total: ${formatDurationHms(breakdown.totalMinutes)}</span>
           </div>
         </div>
@@ -20019,7 +20155,7 @@ function renderRouteSequencerResultsList(node, plans) {
                 <th>Drive (HH:MM:SS)</th>
                 <th>Service (HH:MM:SS)</th>
                 <th>Facility (HH:MM:SS)</th>
-                <th>Other (HH:MM:SS)</th>
+                <th>Penalty/Other (HH:MM:SS)</th>
                 <th>Demand (tons)</th>
                 <th>Load (tons)</th>
                 <th>Notes</th>
@@ -20059,7 +20195,10 @@ function getRouteSequencerPlanBreakdownForSummary(plan) {
     return sum + Math.max(0, Number(event?.otherMinutes) || 0);
   }, 0);
   const serviceFromStops = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.serviceMinutes) || 0), 0);
-  const demandTons = stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0);
+  const demandCalculationEnabled = plan?.demandCalculationEnabled !== false;
+  const demandTons = demandCalculationEnabled
+    ? stops.reduce((sum, stop) => sum + Math.max(0, Number(stop?.demand) || 0), 0)
+    : NaN;
   const driveMinutes = Math.max(0, Number(plan?.totalDriveMinutes) || 0);
   const driveMilesFromEvents = events.reduce((sum, event) => sum + Math.max(0, Number(event?.driveMiles) || 0), 0);
   const driveMiles = Number.isFinite(Number(plan?.totalDriveMiles))
@@ -20100,7 +20239,8 @@ function getRouteSequencerPlanBreakdownForSummary(plan) {
     facilityMinutes: facilityMinutesResolved,
     otherMinutes,
     totalMinutes: totalMinutesResolved,
-    demandTons
+    demandTons,
+    demandCalculationEnabled
   };
 }
 
@@ -20201,7 +20341,7 @@ function summarizeRouteSequencerPlanForRouteSmart(plan) {
     travelWhileServicingMinutes,
     timeAtEndMinutes: breakdown.endMinutes,
     totalMinutes: breakdown.totalMinutes,
-    demandTons: breakdown.demandTons,
+    demandTons: breakdown.demandCalculationEnabled ? breakdown.demandTons : "",
     stemDistanceFromStart: firstStopDriveMiles,
     stemDistanceToEnd: stemToEndMiles,
     totalDistanceMiles: breakdown.driveMiles,
@@ -20827,6 +20967,7 @@ function initRouteSequencerControls() {
   const scopeNoneBtn = document.getElementById("routeSequencerScopeNoneBtn");
   const scopeVisibleBtn = document.getElementById("routeSequencerScopeVisibleBtn");
   const formatHintNode = document.getElementById("routeSequencerFormatHint");
+  const demandNoticeNode = document.getElementById("routeSequencerDemandNotice");
   const capacityInput = document.getElementById("routeSequencerCapacityInput");
   const defaultSpeedInput = document.getElementById("routeSequencerDefaultSpeedInput");
   const sequenceIncrementInput = document.getElementById("routeSequencerSequenceIncrementInput");
@@ -20977,6 +21118,9 @@ function initRouteSequencerControls() {
   let routeSequencerTaskRunning = false;
   let routeSequencerOpenCheckRunning = false;
   let lastRouteSequencerPlans = [];
+  let lastRouteSequencerRowsRef = null;
+  let lastRouteSequencerCacheKey = "";
+  let lastRouteSequencerCacheLabel = "";
 
   const setStatus = (message, kind = "") => {
     statusNode.textContent = String(message || "");
@@ -21036,6 +21180,69 @@ function initRouteSequencerControls() {
   const openRouteSequencerSummaryPreview = () => {
     refreshRouteSequencerSummaryPreview();
     summaryModal.style.display = "flex";
+  };
+
+  const buildRouteSequencerResultsCacheKey = () => {
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
+    const routeDaySignature = Object.keys(routeDayGroups)
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }))
+      .map(key => `${key}:${Number(routeDayGroups[key]?.layers?.length) || 0}`)
+      .join(";");
+    return [
+      String(window._currentFilePath || ""),
+      rows.length,
+      routeDaySignature
+    ].join("|");
+  };
+
+  const hasValidRouteSequencerCachedResults = () => {
+    if (!Array.isArray(lastRouteSequencerPlans) || !lastRouteSequencerPlans.length) return false;
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : null;
+    if (!rows || lastRouteSequencerRowsRef !== rows) return false;
+    return lastRouteSequencerCacheKey === buildRouteSequencerResultsCacheKey();
+  };
+
+  const clearRouteSequencerCachedResults = (options = {}) => {
+    const shouldRender = options?.render !== false;
+    lastRouteSequencerPlans = [];
+    lastRouteSequencerRowsRef = null;
+    lastRouteSequencerCacheKey = "";
+    lastRouteSequencerCacheLabel = "";
+    viewSummaryBtn.disabled = true;
+    exportSummaryBtn.disabled = true;
+    summaryExportBtn.disabled = true;
+    summaryPreviewNode.innerHTML = "";
+    summaryPreviewStatus.textContent = "Run Benchmark Existing Sequence or Auto Sequence to build a summary.";
+    if (shouldRender) renderRouteSequencerResultsList(resultsNode, []);
+  };
+
+  const cacheRouteSequencerResults = (plans, label) => {
+    const rows = Array.isArray(window._currentRows) ? window._currentRows : null;
+    lastRouteSequencerPlans = Array.isArray(plans) ? plans.slice() : [];
+    lastRouteSequencerRowsRef = rows;
+    lastRouteSequencerCacheKey = buildRouteSequencerResultsCacheKey();
+    lastRouteSequencerCacheLabel = String(label || "Route Sequencer");
+    const hasResults = lastRouteSequencerPlans.length > 0;
+    viewSummaryBtn.disabled = !hasResults;
+    exportSummaryBtn.disabled = !hasResults;
+    summaryExportBtn.disabled = routeSequencerTaskRunning || !hasResults;
+    if (summaryModal.style.display === "flex") refreshRouteSequencerSummaryPreview();
+  };
+
+  const renderCachedRouteSequencerResults = () => {
+    if (!hasValidRouteSequencerCachedResults()) {
+      clearRouteSequencerCachedResults();
+      setStatus("Ready.");
+      return false;
+    }
+    renderRouteSequencerResultsList(resultsNode, lastRouteSequencerPlans);
+    viewSummaryBtn.disabled = false;
+    exportSummaryBtn.disabled = false;
+    summaryExportBtn.disabled = routeSequencerTaskRunning || !lastRouteSequencerPlans.length;
+    if (summaryModal.style.display === "flex") refreshRouteSequencerSummaryPreview();
+    const count = lastRouteSequencerPlans.length.toLocaleString();
+    setStatus(`Showing cached ${lastRouteSequencerCacheLabel || "Route Sequencer"} results for ${count} route/day group(s). Run again to refresh.`, "success");
+    return true;
   };
 
   const closeRouteSequencerSummaryPreview = () => {
@@ -21290,8 +21497,12 @@ function initRouteSequencerControls() {
 
   const updateFormatHint = (outputFieldsOverride = null) => {
     const outputFields = outputFieldsOverride || readOutputFieldMappingFromUi();
+    const demandField = String(demandFieldSelect.value || "");
+    if (demandNoticeNode) {
+      demandNoticeNode.hidden = !!demandField;
+    }
     formatHintNode.textContent = buildRouteSequencerFormatHintText(
-      String(demandFieldSelect.value || ""),
+      demandField,
       String(serviceFieldSelect.value || ""),
       outputFields,
       sequenceIncrementInput.value
@@ -21393,7 +21604,7 @@ function initRouteSequencerControls() {
     const fieldNames = getRouteSequencerFieldNames();
     const demandOptions = fieldNames.map(name => ({ value: name, label: name }));
     const serviceOptions = fieldNames.map(name => ({ value: name, label: name }));
-    fillSelect(demandFieldSelect, demandOptions, "Choose demand field...");
+    fillSelect(demandFieldSelect, demandOptions, "No demand calculation");
     fillSelect(serviceFieldSelect, serviceOptions, "None (0 minutes)");
     const preferredServiceField = fieldNames.find(name => normalizeRouteSequencerFieldToken(name) === "servicetime");
 
@@ -21413,8 +21624,13 @@ function initRouteSequencerControls() {
       "timeonsite"
     ]);
 
+    const hasStoredDemandField = settings && Object.prototype.hasOwnProperty.call(settings, "demandField");
     const demandValue = String(settings?.demandField || "");
-    if (demandValue && [...demandFieldSelect.options].some(option => option.value === demandValue)) {
+    if (hasStoredDemandField) {
+      demandFieldSelect.value = [...demandFieldSelect.options].some(option => option.value === demandValue)
+        ? demandValue
+        : "";
+    } else if (demandValue && [...demandFieldSelect.options].some(option => option.value === demandValue)) {
       demandFieldSelect.value = demandValue;
     } else if (guessedDemand) {
       demandFieldSelect.value = guessedDemand;
@@ -21467,15 +21683,8 @@ function initRouteSequencerControls() {
     populateRouteDayScopeSelector(settings);
     populateDepotSelectors(settings);
     populateCustomDumpSelector(settings);
-    lastRouteSequencerPlans = [];
-    viewSummaryBtn.disabled = true;
-    exportSummaryBtn.disabled = true;
-    summaryExportBtn.disabled = true;
-    summaryPreviewNode.innerHTML = "";
-    summaryPreviewStatus.textContent = "Run Benchmark Existing Sequence or Auto Sequence to build a summary.";
-    renderRouteSequencerResultsList(resultsNode, []);
     refreshOptimoRouteCredentialUi();
-    setStatus("Ready.");
+    renderCachedRouteSequencerResults();
   };
 
   window.__refreshRouteSequencerFacilitiesUi = () => {
@@ -21595,6 +21804,7 @@ function initRouteSequencerControls() {
   };
 
   const closeModal = () => {
+    saveCurrentUiSettings();
     modal.style.display = "none";
     openBtn.classList.remove("active");
   };
@@ -21687,10 +21897,7 @@ function initRouteSequencerControls() {
   };
 
   const runEvaluateSequence = async () => {
-    lastRouteSequencerPlans = [];
-    viewSummaryBtn.disabled = true;
-    exportSummaryBtn.disabled = true;
-    summaryExportBtn.disabled = true;
+    clearRouteSequencerCachedResults();
     const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
     if (!rows.length || !Object.keys(routeDayGroups).length) {
       setStatus("Load a route file before evaluating sequence.", "error");
@@ -21718,6 +21925,7 @@ function initRouteSequencerControls() {
       Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
     );
     const demandField = String(settings.demandField || "");
+    const demandCalculationEnabled = !!demandField;
     const serviceField = String(settings.serviceField || "");
     const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
     const serviceStopsBeforeDeadhead = settings.serviceStopsBeforeDeadhead == null
@@ -21817,7 +22025,7 @@ function initRouteSequencerControls() {
       const plan = solveRouteDaySequenceEvaluationPlan(key, stops, {
         graph,
         dumpPoints,
-        capacityTons,
+        capacityTons: demandCalculationEnabled ? capacityTons : NaN,
         fallbackSpeedMph,
         fallbackServiceSpeedMph,
         startDepot,
@@ -21825,11 +22033,12 @@ function initRouteSequencerControls() {
         timeAtStartMinutes: settings.timeAtStartMinutes,
         timeAtEndMinutes: settings.timeAtEndMinutes,
         breakMinutesList,
-        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
+        forceDumpBeforeEnd: demandCalculationEnabled && !!settings.forceDumpBeforeEnd,
         serviceStopsBeforeDeadhead,
         requireNetworkOnly,
         meanderOverrideDefaults,
-        streetAttributeDefaults
+        streetAttributeDefaults,
+        demandCalculationEnabled
       });
       if (plan) plans.push(plan);
       else if (requireNetworkOnly) networkBlockedRouteDayCount += 1;
@@ -21857,7 +22066,10 @@ function initRouteSequencerControls() {
       return;
     }
 
-    const updatedRows = applyRouteSequencerPlansToRows(plans, outputFields, { sequenceIncrement: 1 });
+    const updatedRows = applyRouteSequencerPlansToRows(plans, outputFields, {
+      sequenceIncrement: 1,
+      writeCumulativeLoad: demandCalculationEnabled
+    });
     rebuildSequenceLayerFromPlans(plans);
     syncSequenceLayerVisibilityOnMap();
     refreshAllRecordPopupContent();
@@ -21875,11 +22087,7 @@ function initRouteSequencerControls() {
     const totalRouteMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalMinutes) || 0), 0);
 
     renderRouteSequencerResultsList(resultsNode, plans);
-    lastRouteSequencerPlans = plans.slice();
-    viewSummaryBtn.disabled = false;
-    exportSummaryBtn.disabled = false;
-    summaryExportBtn.disabled = false;
-    if (summaryModal.style.display === "flex") refreshRouteSequencerSummaryPreview();
+    cacheRouteSequencerResults(plans, "Evaluate Sequence");
     const skipNote = skippedRouteDayCount
       ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
       : "";
@@ -21892,17 +22100,17 @@ function initRouteSequencerControls() {
     const networkBlockedNote = networkBlockedRouteDayCount
       ? ` ${networkBlockedRouteDayCount.toLocaleString()} route/day group(s) could not be connected on the street network and were skipped.`
       : "";
+    const demandNote = demandCalculationEnabled
+      ? ""
+      : " Demand field was not selected, so demand, cumulative load, truck capacity, and capacity-based dump calculations were skipped.";
     setStatus(
-      `Evaluate Sequence complete from "${sequenceField}": ${plans.length.toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups, ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min.${skipNote}${noSeqNote}${partialNote}${networkBlockedNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      `Evaluate Sequence complete from "${sequenceField}": ${plans.length.toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups, ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min.${skipNote}${noSeqNote}${partialNote}${networkBlockedNote}${demandNote} Updated rows: ${updatedRows.toLocaleString()}.`,
       "success"
     );
   };
 
   const runSequencer = async () => {
-    lastRouteSequencerPlans = [];
-    viewSummaryBtn.disabled = true;
-    exportSummaryBtn.disabled = true;
-    summaryExportBtn.disabled = true;
+    clearRouteSequencerCachedResults();
     const rows = Array.isArray(window._currentRows) ? window._currentRows : [];
     if (!rows.length || !Object.keys(routeDayGroups).length) {
       setStatus("Load a route file before running Auto Sequence.", "error");
@@ -21931,6 +22139,7 @@ function initRouteSequencerControls() {
       Math.min(fallbackSpeedMph, ROUTE_SEQUENCER_DEFAULT_SERVICE_TRAVEL_SPEED_MPH)
     );
     const demandField = String(settings.demandField || "");
+    const demandCalculationEnabled = !!demandField;
     const serviceField = String(settings.serviceField || "");
     const breakMinutesList = parseRouteSequencerBreakMinutesList(settings.breakMinutesList);
     const serviceStopsBeforeDeadhead = settings.serviceStopsBeforeDeadhead == null
@@ -21942,10 +22151,6 @@ function initRouteSequencerControls() {
     const outputFields = normalizeRouteSequencerOutputFields(settings.outputFields || ROUTE_SEQUENCER_DEFAULT_OUTPUT_FIELDS);
     const requireNetworkOnly = ROUTE_SEQUENCER_REQUIRE_NETWORK_ONLY;
 
-    if (!demandField) {
-      setStatus("Choose a Demand field (Tons) before running Auto Sequence.", "error");
-      return;
-    }
     const outputCheck = validateOutputFieldMapping(outputFields);
     if (!outputCheck.ok) {
       setStatus(outputCheck.message, "error");
@@ -22021,14 +22226,15 @@ function initRouteSequencerControls() {
         timeAtStartMinutes: settings.timeAtStartMinutes,
         timeAtEndMinutes: settings.timeAtEndMinutes,
         breakMinutesList,
-        capacityTons,
+        capacityTons: demandCalculationEnabled ? capacityTons : NaN,
         fallbackSpeedMph,
         fallbackServiceSpeedMph,
-        forceDumpBeforeEnd: !!settings.forceDumpBeforeEnd,
+        forceDumpBeforeEnd: demandCalculationEnabled && !!settings.forceDumpBeforeEnd,
         serviceStopsBeforeDeadhead,
         requireNetworkOnly,
         meanderOverrideDefaults,
-        streetAttributeDefaults
+        streetAttributeDefaults,
+        demandCalculationEnabled
       });
       if (plan) plans.push(plan);
       else if (requireNetworkOnly) networkBlockedRouteDayCount += 1;
@@ -22052,7 +22258,10 @@ function initRouteSequencerControls() {
       return;
     }
 
-    const updatedRows = applyRouteSequencerPlansToRows(plans, outputFields, { sequenceIncrement });
+    const updatedRows = applyRouteSequencerPlansToRows(plans, outputFields, {
+      sequenceIncrement,
+      writeCumulativeLoad: demandCalculationEnabled
+    });
     rebuildSequenceLayerFromPlans(plans);
     syncSequenceLayerVisibilityOnMap();
     refreshAllRecordPopupContent();
@@ -22070,19 +22279,18 @@ function initRouteSequencerControls() {
     const totalRouteMinutes = plans.reduce((sum, plan) => sum + (Number(plan.totalMinutes) || 0), 0);
 
     renderRouteSequencerResultsList(resultsNode, plans);
-    lastRouteSequencerPlans = plans.slice();
-    viewSummaryBtn.disabled = false;
-    exportSummaryBtn.disabled = false;
-    summaryExportBtn.disabled = false;
-    if (summaryModal.style.display === "flex") refreshRouteSequencerSummaryPreview();
+    cacheRouteSequencerResults(plans, "Auto Sequence");
     const skipNote = skippedRouteDayCount
       ? ` ${skippedRouteDayCount.toLocaleString()} route/day groups had no mappable stops.`
       : "";
     const networkBlockedNote = networkBlockedRouteDayCount
       ? ` ${networkBlockedRouteDayCount.toLocaleString()} route/day group(s) could not be connected on the street network and were skipped.`
       : "";
+    const demandNote = demandCalculationEnabled
+      ? ""
+      : " Demand field was not selected, so demand, cumulative load, truck capacity, and capacity-based dump calculations were skipped.";
     setStatus(
-      `Auto Sequence complete with optimized heuristic: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote}${networkBlockedNote} Updated rows: ${updatedRows.toLocaleString()}.`,
+      `Auto Sequence complete with optimized heuristic: ${(plans.length).toLocaleString()} of ${routeDayKeys.length.toLocaleString()} selected Route+Day groups (each treated as one route), ${totalStops.toLocaleString()} stops, ${totalDumpVisits.toLocaleString()} dump visits, drive ${totalDriveMinutes.toFixed(1)} min, miles ${totalDriveMiles.toFixed(2)} mi, service ${totalServiceMinutes.toFixed(1)} min, facility ${totalFacilityMinutes.toFixed(1)} min, breaks ${totalBreakMinutes.toFixed(1)} min, total ${totalRouteMinutes.toFixed(1)} min, sequence increment ${sequenceIncrement}.${skipNote}${networkBlockedNote}${demandNote} Updated rows: ${updatedRows.toLocaleString()}.`,
       "success"
     );
   };
@@ -22235,6 +22443,14 @@ function initRouteSequencerControls() {
     ])
   ].forEach(input => {
     input?.addEventListener("change", () => saveCurrentUiSettings());
+  });
+
+  [
+    timeAtStartInput,
+    timeAtEndInput,
+    breaksInput
+  ].forEach(input => {
+    input?.addEventListener("blur", () => saveCurrentUiSettings());
   });
 
   evaluateBtn.addEventListener("click", () => {
@@ -25968,6 +26184,7 @@ if (labelText) {
     // ðŸ”¥ CRITICAL: link marker to Excel row
     marker._rowRef = row;
     marker._rowId = rowIndex;
+    bindRecordSequenceNavigationClick(marker);
     attributeRowToMarker.set(row, marker);
     attributeMarkerByRowId.set(rowIndex, marker);
     routeDayGroups[key].layers.push(marker);

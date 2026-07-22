@@ -9265,6 +9265,22 @@ body.sun-mode .multiday-manager-status {
   font-weight: 600;
 }
 
+.route-sequencer-demand-notice {
+  grid-column: 1 / -1;
+  border: 1px solid #c79a3f;
+  border-radius: 9px;
+  padding: 7px 9px;
+  background: rgba(77, 50, 13, 0.68);
+  color: #ffe3a3;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.route-sequencer-demand-notice[hidden] {
+  display: none;
+}
+
 .route-sequencer-field-check {
   display: inline-flex;
   align-items: center;
@@ -9872,6 +9888,12 @@ body.sun-mode .route-sequencer-speed-cat-card input {
   border-color: #bfd39f;
   background: #ffffff;
   color: #22401b;
+}
+
+body.sun-mode .route-sequencer-demand-notice {
+  border-color: #d1a847;
+  background: #fff6dc;
+  color: #6d4d08;
 }
 
 body.sun-mode .route-sequencer-field-check {

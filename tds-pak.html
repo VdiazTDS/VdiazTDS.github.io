@@ -319,41 +319,6 @@
       
     </div>
 
-    <div class="filter-group service-day-label-group">
-      <div class="filter-header collapsible-header" id="serviceDayLabelLayerToggle">
-        <div class="days-title">
-          <span class="arrow">&#9654;</span>
-          <strong>Service Day Label Layer</strong>
-        </div>
-        <div class="days-buttons">
-          <button class="mini-btn" id="serviceDayLabelLayerAll" type="button">All</button>
-          <button class="mini-btn" id="serviceDayLabelLayerNone" type="button">None</button>
-        </div>
-      </div>
-      <div id="serviceDayLabelLayerContent" class="collapsible-content collapsed">
-        <label class="service-day-label-master">
-          <input type="checkbox" id="serviceDayLabelLayerEnabled" />
-          Show Service Day Labels
-        </label>
-        <div class="service-day-label-subhead-row">
-          <div class="service-day-label-subhead">Days</div>
-          <div class="service-day-label-sub-actions">
-            <button class="mini-btn" id="serviceDayLabelDaysAll" type="button">All</button>
-            <button class="mini-btn" id="serviceDayLabelDaysNone" type="button">None</button>
-          </div>
-        </div>
-        <div id="serviceDayLabelDayFilters" class="service-day-label-list"></div>
-        <div class="service-day-label-subhead-row">
-          <div class="service-day-label-subhead">Frequencies</div>
-          <div class="service-day-label-sub-actions">
-            <button class="mini-btn" id="serviceDayLabelFreqAll" type="button">All</button>
-            <button class="mini-btn" id="serviceDayLabelFreqNone" type="button">None</button>
-          </div>
-        </div>
-        <div id="serviceDayLabelFrequencyFilters" class="service-day-label-list"></div>
-      </div>
-    </div>
-
     <div class="filter-group sequence-layer-group">
       <div class="filter-header collapsible-header" id="sequenceLayerToggleHeader">
         <div class="days-title">
@@ -390,6 +355,41 @@
         <div id="sequenceLayerStatus" class="service-day-label-empty sequence-layer-status">
           Select Newseq or SeqNo to draw route arrows.
         </div>
+      </div>
+    </div>
+
+    <div class="filter-group service-day-label-group">
+      <div class="filter-header collapsible-header" id="serviceDayLabelLayerToggle">
+        <div class="days-title">
+          <span class="arrow">&#9654;</span>
+          <strong>Service Day Label Layer</strong>
+        </div>
+        <div class="days-buttons">
+          <button class="mini-btn" id="serviceDayLabelLayerAll" type="button">All</button>
+          <button class="mini-btn" id="serviceDayLabelLayerNone" type="button">None</button>
+        </div>
+      </div>
+      <div id="serviceDayLabelLayerContent" class="collapsible-content collapsed">
+        <label class="service-day-label-master">
+          <input type="checkbox" id="serviceDayLabelLayerEnabled" />
+          Show Service Day Labels
+        </label>
+        <div class="service-day-label-subhead-row">
+          <div class="service-day-label-subhead">Days</div>
+          <div class="service-day-label-sub-actions">
+            <button class="mini-btn" id="serviceDayLabelDaysAll" type="button">All</button>
+            <button class="mini-btn" id="serviceDayLabelDaysNone" type="button">None</button>
+          </div>
+        </div>
+        <div id="serviceDayLabelDayFilters" class="service-day-label-list"></div>
+        <div class="service-day-label-subhead-row">
+          <div class="service-day-label-subhead">Frequencies</div>
+          <div class="service-day-label-sub-actions">
+            <button class="mini-btn" id="serviceDayLabelFreqAll" type="button">All</button>
+            <button class="mini-btn" id="serviceDayLabelFreqNone" type="button">None</button>
+          </div>
+        </div>
+        <div id="serviceDayLabelFrequencyFilters" class="service-day-label-list"></div>
       </div>
     </div>
 
@@ -1171,6 +1171,9 @@
         <span>Demand Field (Tons)</span>
         <select id="routeSequencerDemandField"></select>
       </label>
+      <div id="routeSequencerDemandNotice" class="route-sequencer-demand-notice" hidden>
+        No Demand Field selected: demand, cumulative load, truck capacity, and capacity-based dump calculations will be skipped.
+      </div>
       <label class="route-sequencer-field">
         <span>Service Time Field (Min or MM:SS)</span>
         <select id="routeSequencerServiceTimeField"></select>
