@@ -8819,6 +8819,7 @@ const symbolMap = {};        // stores symbol for each route/day combo
 const routeDayGroups = {};   // stores map markers grouped by route/day
 const LAYER_MANAGER_ORDER_STORAGE_KEY = "layerManagerOrderTop";
 const LAYER_MANAGER_SELECTABLE_STORAGE_KEY = "layerManagerSelectable";
+const ROUTE_DAY_LAYER_COLORS_STORAGE_KEY = "routeDayLayerColors";
 const LAYER_MANAGER_STREET_KEY = "street-network";
 const ROUTE_SEQUENCE_LAYER_VISIBLE_KEY = "routeSequenceLayerVisible";
 const ROUTE_SEQUENCE_FIELD_KEY = "routeSequenceField";
@@ -8826,6 +8827,9 @@ const ROUTE_SEQUENCE_FIELD_OPTIONS = Object.freeze(["NEWSEQ", "SEQNO"]);
 const ROUTE_SEQUENCE_NAV_SKIP_COUNT = 5;
 let layerManagerOrderTop = [];
 let layerManagerSelectableState = {};
+let routeDayLayerColorOverrides = loadStoredRouteDayLayerColors();
+let routeDayLayerColorMenuNode = null;
+let routeDayLayerColorMenuBound = false;
 const sequenceLayerByRouteDay = new Map();
 const sequenceLayerState = {
   routeDayCount: 0,
@@ -8839,6 +8843,333 @@ let sequenceLayerNavigationRecords = [];
 let sequenceLayerActiveRecordKey = "";
 let sequenceLayerActiveRouteDayKey = "";
 let sequenceLayerFocusMarker = null;
+
+function normalizeRouteDayLayerColor(value) {
+  const text = String(value || "").trim().toLowerCase();
+  const shortHex = text.match(/^#([0-9a-f]{3})$/i);
+  if (shortHex) {
+    return `#${shortHex[1].split("").map(ch => ch + ch).join("")}`.toLowerCase();
+  }
+  return /^#[0-9a-f]{6}$/i.test(text) ? text.toLowerCase() : "";
+}
+
+function routeDayHslToHex(hue, saturationPercent, lightnessPercent) {
+  const h = ((((Number(hue) || 0) % 360) + 360) % 360) / 360;
+  const s = Math.max(0, Math.min(1, (Number(saturationPercent) || 0) / 100));
+  const l = Math.max(0, Math.min(1, (Number(lightnessPercent) || 0) / 100));
+  const hueToRgb = (p, q, tValue) => {
+    let t = tValue;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channels = s === 0
+    ? [l, l, l]
+    : [hueToRgb(p, q, h + 1 / 3), hueToRgb(p, q, h), hueToRgb(p, q, h - 1 / 3)];
+  return `#${channels.map(channel => {
+    const hex = Math.round(channel * 255).toString(16);
+    return hex.length === 1 ? `0${hex}` : hex;
+  }).join("")}`;
+}
+
+function getGeneratedRouteDayLayerColor(symbolNumber) {
+  const index = Math.max(0, Number(symbolNumber) || 0);
+  const hue = Math.round((index * 137.508) % 360);
+  return routeDayHslToHex(hue, 80, 52);
+}
+
+function loadStoredRouteDayLayerColors() {
+  const raw = storageGet(ROUTE_DAY_LAYER_COLORS_STORAGE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const colors = {};
+    Object.keys(parsed).forEach(key => {
+      const routeDayKey = String(key || "").trim();
+      const color = normalizeRouteDayLayerColor(parsed[key]);
+      if (routeDayKey && color) colors[routeDayKey] = color;
+    });
+    return colors;
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveRouteDayLayerColors() {
+  storageSet(ROUTE_DAY_LAYER_COLORS_STORAGE_KEY, JSON.stringify(routeDayLayerColorOverrides || {}));
+}
+
+function getStoredRouteDayLayerColor(key) {
+  const routeDayKey = String(key || "").trim();
+  if (!routeDayKey || !routeDayLayerColorOverrides || typeof routeDayLayerColorOverrides !== "object") return "";
+  return normalizeRouteDayLayerColor(routeDayLayerColorOverrides[routeDayKey]);
+}
+
+function getRouteDayLayerInputColorValue(key) {
+  const symbol = symbolMap[key] || getSymbol(key);
+  return normalizeRouteDayLayerColor(symbol?.color)
+    || normalizeRouteDayLayerColor(symbol?.defaultColor)
+    || "#2f89df";
+}
+
+function formatRouteDayLayerLabel(key) {
+  const [route = "", rawDay = ""] = String(key || "").split("|");
+  const dayNumber = Number(rawDay);
+  const dayLabel = Number.isFinite(dayNumber) ? (dayName(dayNumber) || String(rawDay)) : String(rawDay || "No Day");
+  return `Route ${route || "Unassigned"} - ${dayLabel}`;
+}
+
+function applyRouteDayLayerPreviewStyle(node, symbol, options = {}) {
+  if (!node) return;
+  const opts = options && typeof options === "object" ? options : {};
+  const color = String(symbol?.color || "#2f89df").trim() || "#2f89df";
+  const shape = String(symbol?.shape || "circle");
+  const size = Math.max(8, Number(opts.size) || 14);
+  const triangleHalfWidth = Math.max(4, Number(opts.triangleHalfWidth) || Math.round(size / 2));
+  const triangleHeight = Math.max(8, Number(opts.triangleHeight) || size);
+
+  node.style.width = `${size}px`;
+  node.style.height = `${size}px`;
+  node.style.background = color;
+  node.style.borderRadius = "50%";
+  node.style.transform = "";
+  node.style.borderLeft = "";
+  node.style.borderRight = "";
+  node.style.borderTop = "";
+  node.style.borderBottom = "";
+
+  if (shape === "square") {
+    node.style.borderRadius = "2px";
+  } else if (shape === "triangle") {
+    node.style.width = "0";
+    node.style.height = "0";
+    node.style.background = "transparent";
+    node.style.borderLeft = `${triangleHalfWidth}px solid transparent`;
+    node.style.borderRight = `${triangleHalfWidth}px solid transparent`;
+    node.style.borderBottom = `${triangleHeight}px solid ${color}`;
+    node.style.borderTop = "0";
+    node.style.borderRadius = "0";
+  } else if (shape === "diamond") {
+    node.style.borderRadius = "2px";
+    node.style.transform = "rotate(45deg)";
+  }
+}
+
+function refreshRouteDayLayerColorPreviews(key) {
+  const routeDayKey = String(key || "").trim();
+  if (!routeDayKey) return;
+  const symbol = symbolMap[routeDayKey] || getSymbol(routeDayKey);
+  document.querySelectorAll("[data-route-day-color-preview]").forEach(node => {
+    if (node.dataset.routeDayColorPreview !== routeDayKey) return;
+    const isManagerSwatch = node.classList.contains("layer-manager-swatch");
+    applyRouteDayLayerPreviewStyle(node, symbol, {
+      size: isManagerSwatch ? 12 : 14,
+      triangleHalfWidth: isManagerSwatch ? 6 : 7,
+      triangleHeight: isManagerSwatch ? 12 : 14
+    });
+  });
+}
+
+function refreshSequenceLayerColorForRouteDay(key) {
+  const routeDayKey = String(key || "").trim();
+  if (!routeDayKey) return;
+  const color = getSequenceLayerLineColor(routeDayKey);
+  const layerGroup = sequenceLayerByRouteDay.get(routeDayKey);
+  if (layerGroup && typeof layerGroup.eachLayer === "function") {
+    layerGroup.eachLayer(layer => {
+      if (layer?._sequenceRouteDayKey !== routeDayKey) return;
+      if (typeof layer.setStyle === "function") {
+        layer.setStyle({ color });
+      }
+      if (typeof layer.setIcon === "function") {
+        const bearing = Number(layer._sequenceBearingDeg);
+        layer.setIcon(buildSequenceArrowIcon(Number.isFinite(bearing) ? bearing : 0, color));
+      }
+    });
+  }
+  if (sequenceLayerActiveRouteDayKey === routeDayKey && sequenceLayerFocusMarker && typeof sequenceLayerFocusMarker.setIcon === "function") {
+    sequenceLayerFocusMarker.setIcon(buildSequenceFocusIcon(color));
+  }
+}
+
+function reapplyRouteDaySelectionStyles() {
+  const hasManualLayerScope = !!selectedLayerKey || !!drawnLayer?.getLayers?.().length;
+  if (hasManualLayerScope && typeof updateSelectionCount === "function") {
+    updateSelectionCount();
+  } else if (typeof applyAttributeSelectionStyles === "function") {
+    applyAttributeSelectionStyles();
+  }
+}
+
+function applyRouteDayLayerColor(key, colorValue, options = {}) {
+  const routeDayKey = String(key || "").trim();
+  const color = normalizeRouteDayLayerColor(colorValue);
+  if (!routeDayKey || !color) return false;
+
+  const symbol = symbolMap[routeDayKey] || getSymbol(routeDayKey);
+  symbol.color = color;
+
+  if (options?.persist !== false) {
+    const defaultColor = normalizeRouteDayLayerColor(symbol.defaultColor);
+    if (defaultColor && color === defaultColor) {
+      delete routeDayLayerColorOverrides[routeDayKey];
+    } else {
+      routeDayLayerColorOverrides[routeDayKey] = color;
+    }
+    saveRouteDayLayerColors();
+  }
+
+  const layers = Array.isArray(routeDayGroups[routeDayKey]?.layers) ? routeDayGroups[routeDayKey].layers : [];
+  layers.forEach(layer => {
+    if (layer?._base && typeof layer._base === "object") {
+      layer._base.symbol = symbol;
+    }
+    layer?.setStyle?.({
+      color,
+      fillColor: color,
+      fillOpacity: 0.95,
+      opacity: 1
+    });
+  });
+
+  refreshRouteDayLayerColorPreviews(routeDayKey);
+  refreshSequenceLayerColorForRouteDay(routeDayKey);
+  reapplyRouteDaySelectionStyles();
+  return true;
+}
+
+function resetRouteDayLayerColor(key) {
+  const routeDayKey = String(key || "").trim();
+  if (!routeDayKey) return "";
+  const symbol = symbolMap[routeDayKey] || getSymbol(routeDayKey);
+  const defaultColor = normalizeRouteDayLayerColor(symbol.defaultColor) || "#2f89df";
+  applyRouteDayLayerColor(routeDayKey, defaultColor, { persist: true });
+  return defaultColor;
+}
+
+function closeRouteDayLayerColorMenu() {
+  if (!routeDayLayerColorMenuNode) return;
+  routeDayLayerColorMenuNode.hidden = true;
+  routeDayLayerColorMenuNode.classList.remove("open");
+}
+
+function ensureRouteDayLayerColorMenu() {
+  if (!routeDayLayerColorMenuNode) {
+    routeDayLayerColorMenuNode = document.createElement("div");
+    routeDayLayerColorMenuNode.className = "route-day-color-menu";
+    routeDayLayerColorMenuNode.hidden = true;
+    routeDayLayerColorMenuNode.addEventListener("click", event => event.stopPropagation());
+    routeDayLayerColorMenuNode.addEventListener("contextmenu", event => event.preventDefault());
+    document.body.appendChild(routeDayLayerColorMenuNode);
+  }
+
+  if (!routeDayLayerColorMenuBound) {
+    routeDayLayerColorMenuBound = true;
+    document.addEventListener("click", event => {
+      if (!routeDayLayerColorMenuNode || routeDayLayerColorMenuNode.hidden) return;
+      if (routeDayLayerColorMenuNode.contains(event.target)) return;
+      closeRouteDayLayerColorMenu();
+    });
+    window.addEventListener("keydown", event => {
+      if (event.key === "Escape") closeRouteDayLayerColorMenu();
+    });
+    window.addEventListener("resize", closeRouteDayLayerColorMenu);
+  }
+
+  return routeDayLayerColorMenuNode;
+}
+
+function openRouteDayLayerColorMenu(key, event, options = {}) {
+  const routeDayKey = String(key || "").trim();
+  if (!routeDayKey || !Object.prototype.hasOwnProperty.call(routeDayGroups, routeDayKey)) return false;
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+
+  const opts = options && typeof options === "object" ? options : {};
+  const menu = ensureRouteDayLayerColorMenu();
+  const symbol = symbolMap[routeDayKey] || getSymbol(routeDayKey);
+  const label = formatRouteDayLayerLabel(routeDayKey);
+
+  menu.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.className = "route-day-color-menu-title";
+  title.textContent = "Layer Color";
+
+  const layerLabel = document.createElement("div");
+  layerLabel.className = "route-day-color-menu-layer";
+  layerLabel.textContent = label;
+
+  const controlRow = document.createElement("div");
+  controlRow.className = "route-day-color-menu-row";
+
+  const swatch = document.createElement("span");
+  swatch.className = "route-day-color-menu-swatch";
+  applyRouteDayLayerPreviewStyle(swatch, symbol, { size: 18, triangleHalfWidth: 9, triangleHeight: 18 });
+
+  const colorInput = document.createElement("input");
+  colorInput.type = "color";
+  colorInput.value = getRouteDayLayerInputColorValue(routeDayKey);
+  colorInput.setAttribute("aria-label", `Color for ${label}`);
+
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "route-day-color-menu-reset";
+  resetBtn.textContent = "Reset";
+
+  const setMenuSwatch = () => {
+    applyRouteDayLayerPreviewStyle(swatch, symbolMap[routeDayKey] || getSymbol(routeDayKey), {
+      size: 18,
+      triangleHalfWidth: 9,
+      triangleHeight: 18
+    });
+  };
+
+  colorInput.addEventListener("input", () => {
+    if (!applyRouteDayLayerColor(routeDayKey, colorInput.value, { persist: true })) return;
+    setMenuSwatch();
+  });
+
+  colorInput.addEventListener("change", () => {
+    if (typeof opts.onStatus === "function") {
+      opts.onStatus(`Updated color: ${label}`);
+    }
+  });
+
+  resetBtn.addEventListener("click", () => {
+    const defaultColor = resetRouteDayLayerColor(routeDayKey);
+    colorInput.value = defaultColor;
+    setMenuSwatch();
+    if (typeof opts.onStatus === "function") {
+      opts.onStatus(`Reset color: ${label}`);
+    }
+  });
+
+  controlRow.append(swatch, colorInput, resetBtn);
+  menu.append(title, layerLabel, controlRow);
+
+  menu.hidden = false;
+  menu.classList.add("open");
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+
+  const rect = menu.getBoundingClientRect();
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  const margin = 8;
+  const left = Math.max(margin, Math.min(Number.isFinite(x) ? x : margin, window.innerWidth - rect.width - margin));
+  const top = Math.max(margin, Math.min(Number.isFinite(y) ? y : margin, window.innerHeight - rect.height - margin));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  colorInput.focus();
+  return true;
+}
 // ===== DELIVERED STOPS LAYER =====
 
 function layerManagerDaySortRank(value) {
@@ -9885,6 +10216,7 @@ function rebuildSequenceLayerFromUploadedRows(options = {}) {
         zIndexOffset: 1000
       });
       arrowMarker._sequenceRouteDayKey = routeDayKey;
+      arrowMarker._sequenceBearingDeg = bearing;
       layerGroup.addLayer(arrowMarker);
       arrowCount += 1;
     }
@@ -10045,6 +10377,7 @@ function rebuildSequenceLayerFromPlans(plans) {
         zIndexOffset: 1000
       });
       arrowMarker._sequenceRouteDayKey = routeDayKey;
+      arrowMarker._sequenceBearingDeg = bearing;
       layerGroup.addLayer(arrowMarker);
       arrowCount += 1;
     }
@@ -10809,9 +11142,11 @@ function dayName(n) {
 function getSymbol(key) {
   if (!symbolMap[key]) {
     // Generate a distinct color per route+day using golden-angle hue stepping.
-    const hue = Math.round((symbolIndex * 137.508) % 360);
+    const defaultColor = getGeneratedRouteDayLayerColor(symbolIndex);
+    const savedColor = getStoredRouteDayLayerColor(key);
     symbolMap[key] = {
-      color: `hsl(${hue} 80% 52%)`,
+      color: savedColor || defaultColor,
+      defaultColor,
       shape: shapes[symbolIndex % shapes.length]
     };
     symbolIndex++;
@@ -11237,6 +11572,10 @@ function buildRouteDayLayerControls() {
 
     const wrapper = document.createElement("div");
     wrapper.className = "layer-item";
+    wrapper.dataset.routeDayLayerKey = key;
+    wrapper.addEventListener("contextmenu", event => {
+      openRouteDayLayerColorMenu(key, event);
+    });
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -11262,23 +11601,12 @@ function buildRouteDayLayerControls() {
     const symbol = getSymbol(key);
     const preview = document.createElement("span");
     preview.className = "layer-preview";
-    preview.style.background = symbol.color;
-
-    if (symbol.shape === "circle") preview.style.borderRadius = "50%";
-    if (symbol.shape === "square") preview.style.borderRadius = "2px";
-
-    if (symbol.shape === "triangle") {
-      preview.style.background = "transparent";
-      preview.style.width = "0";
-      preview.style.height = "0";
-      preview.style.borderLeft = "7px solid transparent";
-      preview.style.borderRight = "7px solid transparent";
-      preview.style.borderBottom = `14px solid ${symbol.color}`;
-    }
-
-    if (symbol.shape === "diamond") {
-      preview.style.transform = "rotate(45deg)";
-    }
+    preview.dataset.routeDayColorPreview = key;
+    applyRouteDayLayerPreviewStyle(preview, symbol, {
+      size: 14,
+      triangleHalfWidth: 7,
+      triangleHeight: 14
+    });
 
     const labelText = document.createElement("span");
     const dayName = dayNameMap[type] || type;
@@ -16358,24 +16686,12 @@ function initLayerManagerControls() {
     }
 
     const symbol = symbolMap[entryId] || getSymbol(entryId);
-    swatch.style.background = symbol.color;
-    if (symbol.shape === "circle") {
-      swatch.style.borderRadius = "50%";
-    } else if (symbol.shape === "square") {
-      swatch.style.borderRadius = "2px";
-    } else if (symbol.shape === "triangle") {
-      swatch.style.width = "0";
-      swatch.style.height = "0";
-      swatch.style.borderLeft = "6px solid transparent";
-      swatch.style.borderRight = "6px solid transparent";
-      swatch.style.borderBottom = `12px solid ${symbol.color}`;
-      swatch.style.borderRadius = "0";
-      swatch.style.background = "transparent";
-      swatch.style.borderTop = "0";
-    } else if (symbol.shape === "diamond") {
-      swatch.style.borderRadius = "2px";
-      swatch.style.transform = "rotate(45deg)";
-    }
+    swatch.dataset.routeDayColorPreview = entryId;
+    applyRouteDayLayerPreviewStyle(swatch, symbol, {
+      size: 12,
+      triangleHalfWidth: 6,
+      triangleHeight: 12
+    });
     return swatch;
   };
 
@@ -16408,6 +16724,11 @@ function initLayerManagerControls() {
         row.className = "layer-manager-row";
         row.dataset.entryId = entryId;
         row.draggable = true;
+        if (isRouteDayLayerManagerEntry(entryId)) {
+          row.addEventListener("contextmenu", event => {
+            openRouteDayLayerColorMenu(entryId, event, { onStatus: setStatus });
+          });
+        }
 
         const dragHandle = document.createElement("span");
         dragHandle.className = "layer-manager-drag";

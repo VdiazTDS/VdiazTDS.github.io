@@ -5930,6 +5930,110 @@ body.sun-mode #copyDiagnosticsBtn {
   width: 14px;
   height: 14px;
   display: inline-block;
+  flex: 0 0 auto;
+}
+
+.route-day-color-menu {
+  position: fixed;
+  z-index: 10050;
+  min-width: 210px;
+  padding: 10px;
+  border: 1px solid #546a80;
+  border-radius: 8px;
+  background: #1f2b36;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+}
+
+.route-day-color-menu[hidden] {
+  display: none;
+}
+
+.route-day-color-menu-title {
+  color: #eef6ff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.route-day-color-menu-layer {
+  margin-top: 3px;
+  color: #b7cae0;
+  font-size: 11px;
+  line-height: 1.25;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-day-color-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.route-day-color-menu-swatch {
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.route-day-color-menu input[type="color"] {
+  width: 42px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid #6f879f;
+  border-radius: 7px;
+  background: #111a24;
+  cursor: pointer;
+}
+
+.route-day-color-menu-reset {
+  border: 1px solid #607890;
+  border-radius: 7px;
+  background: #2b3846;
+  color: #eaf3fc;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+.route-day-color-menu-reset:hover {
+  border-color: #7bc3f7;
+  background: #34495c;
+  color: #ffffff;
+}
+
+body.sun-mode .route-day-color-menu {
+  border-color: #c2d5e7;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(25, 52, 76, 0.18);
+}
+
+body.sun-mode .route-day-color-menu-title {
+  color: #14304a;
+}
+
+body.sun-mode .route-day-color-menu-layer {
+  color: #4f6f89;
+}
+
+body.sun-mode .route-day-color-menu input[type="color"] {
+  border-color: #b7cde0;
+  background: #f7fbff;
+}
+
+body.sun-mode .route-day-color-menu-reset {
+  border-color: #bdd1e4;
+  background: #f4f9fd;
+  color: #214660;
+}
+
+body.sun-mode .route-day-color-menu-reset:hover {
+  border-color: #74aedd;
+  background: #e9f4ff;
+  color: #174569;
 }
 
 /* ===== Undo Pulse Animation ===== */
