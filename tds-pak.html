@@ -178,14 +178,12 @@
     <div class="map-view-group">
       <label for="baseMapSelect" class="map-view-label">Basemap</label>
       <select id="baseMapSelect" aria-label="Basemap">
-        <option value="streets">Streets (Detailed)</option>
-        <option value="freeStreets">OSM Streets (Free)</option>
-        <option value="topographic">Topographic</option>
-        <option value="terrain">Terrain</option>
-        <option value="natGeo">National Geographic</option>
-        <option value="lightGray">Light Gray Canvas</option>
-        <option value="darkGray">Dark Gray Canvas</option>
-        <option value="satellite">Satellite (Imagery)</option>
+        <option value="streets">OpenStreetMap Streets</option>
+        <option value="humanitarian">Humanitarian OSM</option>
+        <option value="cyclosm">CyclOSM</option>
+        <option value="topographic">OpenTopoMap</option>
+        <option value="osmFrance">OSM France</option>
+        <option value="none">No Basemap</option>
       </select>
     </div>
     <label class="map-network-toggle street-network-sidebar-toggle street-network-toggle-wrap">
@@ -1847,7 +1845,7 @@
   </div>
 </div>
 <script src="https://unpkg.com/shpjs@6.2.0/dist/shp.min.js" defer></script>
-<script src="app-tds-pak.js?v=20260706-06" defer></script>
+<script src="app-tds-pak.js?v=20260831-02" defer></script>
 <!-- MOBILE Selected Stops Button -->
 <button id="mobileSelectionBtn">Selected: 0</button>
 

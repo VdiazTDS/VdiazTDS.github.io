@@ -1689,55 +1689,40 @@ const txdotTrafficCountsRenderer = L.canvas({ padding: 0.5, pane: TXDOT_TRAFFIC_
 
 
 // ===== BASE MAP LAYERS =====
+const OSM_BASEMAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
 const baseMaps = {
-  streets: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
-      maxZoom: 20,
-      maxNativeZoom: 19
-    }),
-  freeStreets: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  streets: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 20,
       maxNativeZoom: 19,
+      attribution: OSM_BASEMAP_ATTRIBUTION
+    }),
+  humanitarian: L.tileLayer("https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png", {
+      maxZoom: 20,
+      maxNativeZoom: 20,
       subdomains: ["a", "b", "c"],
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      attribution: `${OSM_BASEMAP_ATTRIBUTION}, tiles style by <a href="https://www.hotosm.org/">Humanitarian OpenStreetMap Team</a>, hosted by <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>`
     }),
-  topographic: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}", {
+  cyclosm: L.tileLayer("https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png", {
       maxZoom: 20,
-      maxNativeZoom: 19
+      maxNativeZoom: 20,
+      subdomains: ["a", "b", "c"],
+      attribution: `${OSM_BASEMAP_ATTRIBUTION}, tiles style by <a href="https://www.cyclosm.org/">CyclOSM</a>, hosted by <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>`
     }),
-  terrain: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Terrain_Base/MapServer/tile/{z}/{y}/{x}", {
+  topographic: L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
       maxZoom: 20,
-      maxNativeZoom: 13
+      maxNativeZoom: 17,
+      subdomains: ["a", "b", "c"],
+      attribution: 'map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)'
     }),
-  natGeo: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}", {
+  osmFrance: L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", {
       maxZoom: 20,
-      maxNativeZoom: 16
+      maxNativeZoom: 20,
+      subdomains: ["a", "b", "c"],
+      attribution: `${OSM_BASEMAP_ATTRIBUTION}, tiles by <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>`
     }),
-  lightGray: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
-      maxZoom: 20,
-      maxNativeZoom: 16
-    }),
-  darkGray: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
-      maxZoom: 20,
-      maxNativeZoom: 16
-    }),
-
-  satellite: L.tileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    {
-      maxZoom: 20,
-      maxNativeZoom: 19
-    }
-  )
+  none: L.layerGroup()
 };
-// ===== SATELLITE STREET NAME OVERLAY (LIGHTWEIGHT) =====
-const satelliteLabelsLayer = L.tileLayer(
-  "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
-  {
-    maxZoom: 20,
-    maxNativeZoom: 19,
-    opacity: 1
-  }
-);
 const MULTI_DAY_LABEL_PANE = "multiDayLabelPane";
 const MULTI_DAY_LABEL_HARD_LIMIT = 12000;
 const multiDayLabelPane = map.createPane(MULTI_DAY_LABEL_PANE);
@@ -8792,14 +8777,10 @@ baseMaps.streets.addTo(map);
 // Dropdown to switch map type
 document.getElementById("baseMapSelect").addEventListener("change", e => {
   Object.values(baseMaps).forEach(l => map.removeLayer(l));
-  map.removeLayer(satelliteLabelsLayer);
 
-  const selected = e.target.value;
+  const selected = baseMaps[e.target.value] ? e.target.value : "streets";
+  if (selected !== e.target.value) e.target.value = selected;
   baseMaps[selected].addTo(map);
-
-  if (selected === "satellite" && map.getZoom() >= 15) {
-    satelliteLabelsLayer.addTo(map);
-  }
   syncStreetNetworkOverlay();
 });
 
@@ -28376,14 +28357,10 @@ initSetSegmentIdSideControls();
 if (baseSelect) {
   baseSelect.addEventListener("change", e => {
     Object.values(baseMaps).forEach(l => map.removeLayer(l));
-    map.removeLayer(satelliteLabelsLayer);
 
-    const selected = e.target.value;
+    const selected = baseMaps[e.target.value] ? e.target.value : "streets";
+    if (selected !== e.target.value) e.target.value = selected;
     baseMaps[selected].addTo(map);
-
-    if (selected === "satellite" && map.getZoom() >= 15) {
-      satelliteLabelsLayer.addTo(map);
-    }
     syncStreetNetworkOverlay();
   });
 }
@@ -30188,20 +30165,6 @@ map.on("zoomend", () => {
   const newSize = getMarkerPixelSize();
   const currentZoom = map.getZoom();
   const maxZoom = map.getMaxZoom();
-
-// ===== AUTO TOGGLE SATELLITE STREET NAMES =====
-const currentBase = document.getElementById("baseMapSelect")?.value;
-
-if (currentBase === "satellite") {
-  if (map.getZoom() >= 15) {
-    map.addLayer(satelliteLabelsLayer);
-  } else {
-    map.removeLayer(satelliteLabelsLayer);
-  }
-} else {
-  map.removeLayer(satelliteLabelsLayer);
-}
-
 
   Object.values(routeDayGroups).forEach(group => {
     group.layers.forEach(layer => {
