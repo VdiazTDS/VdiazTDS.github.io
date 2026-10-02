@@ -26615,6 +26615,67 @@ async function cloudFileExistsInStorage(fileName) {
   return (data || []).some(file => String(file?.name || "") === name);
 }
 
+async function getSummarySourceRouteRows(summaryName, routeFileName = "") {
+  if (!routeFileName) {
+    await ensureSummaryAttachmentsInitialized();
+    const { data, error } = await sb.storage.from(BUCKET).list();
+    if (error) throw error;
+    routeFileName = (data || []).find(file =>
+      !isRouteSummaryFileName(file.name) &&
+      !isSystemCloudFileName(file.name) &&
+      file.name !== summaryName &&
+      resolveSummaryForRoute(file.name, data) === summaryName
+    )?.name;
+  }
+  if (!routeFileName) return [];
+  if (window._currentFilePath === routeFileName && Array.isArray(window._currentRows)) {
+    return window._currentRows;
+  }
+
+  await ensureFileColumnMappingsInitialized();
+  const { data } = sb.storage.from(BUCKET).getPublicUrl(routeFileName);
+  const separator = data.publicUrl.includes("?") ? "&" : "?";
+  const response = await fetch(`${data.publicUrl}${separator}v=${Date.now()}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Route file fetch failed (${response.status}).`);
+  const workbook = XLSX.read(new Uint8Array(await response.arrayBuffer()), { type: "array" });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
+  applyColumnAliasesToRows(rows, buildInitialColumnMapping(collectColumnMappingHeaders(rows), routeFileName));
+  return rows;
+}
+
+function addSummaryTotalLifts(rows, headers, routeRows) {
+  const totalHeader = "Total Lifts";
+  const sourceHeaders = Array.isArray(headers) ? headers : [];
+  const outputHeaders = sourceHeaders.filter(header => normalizeSummaryHeaderValue(header) !== "totallifts");
+  outputHeaders.push(totalHeader);
+  const fields = getSummaryRouteDayFields(sourceHeaders);
+  const totals = new Map();
+  const routeDayKey = (route, day) => JSON.stringify([
+    String(route ?? "").trim().toLowerCase(), normalizeDayToken(day)
+  ]);
+
+  (routeRows || []).forEach(row => {
+    const route = getMappedRowRoute(row);
+    const day = getMappedRowDayRaw(row);
+    if (!route || !day || !Object.prototype.hasOwnProperty.call(row, "QTY")) return;
+    const key = routeDayKey(route, day);
+    const text = String(row.QTY ?? "").trim().replace(/,/g, "");
+    const quantity = text ? Number(text) : 0;
+    totals.set(key, (totals.get(key) || 0) + (Number.isFinite(quantity) ? quantity : 0));
+  });
+
+  return {
+    headers: outputHeaders,
+    rows: (rows || []).map(row => {
+      const { routeValue, dayValue } = getSummaryRouteDayFromRow(row, fields);
+      const total = routeValue && dayValue && !isSummaryAggregateRow(row, sourceHeaders, fields)
+        ? totals.get(routeDayKey(routeValue, dayValue))
+        : undefined;
+      return { ...row, [totalHeader]: total ?? "" };
+    })
+  };
+}
+
 async function loadSummaryFileFromCloud(summaryName) {
   const name = String(summaryName || "").trim();
   if (!name) return false;
@@ -26679,7 +26740,8 @@ async function loadSummaryFileFromCloud(summaryName) {
     return obj;
   });
 
-  showRouteSummary(rows, headers);
+  const routeRows = await getSummarySourceRouteRows(name);
+  showRouteSummary(rows, headers, routeRows);
   autoCollapseSidebarsForSummary();
 
   // Force the panel open when a summary exists (desktop).
@@ -27195,7 +27257,7 @@ async function uploadRouteSummaryAndAttach(file) {
 }
 
 // ================= ROUTE SUMMARY DISPLAY =================
-function showRouteSummary(rows, headers) {
+function showRouteSummary(rows, headers, routeRows = []) {
   const tableBox = document.getElementById("routeSummaryTable");
   const panel = document.getElementById("bottomSummary");
   const btn = document.getElementById("summaryToggleBtn");
@@ -27206,6 +27268,7 @@ function showRouteSummary(rows, headers) {
     window._routeSummaryTableLayoutCleanup = null;
   }
 
+  ({ rows, headers } = addSummaryTotalLifts(rows, headers, routeRows));
   tableBox.innerHTML = "";
   window._summaryRows = Array.isArray(rows) ? rows : [];
   window._summaryHeaders = Array.isArray(headers) ? headers : [];
@@ -27633,7 +27696,8 @@ const rows = raw.slice(dataStartIndex).map(r => {
 
 
 
-showRouteSummary(rows, headers);
+const routeRows = await getSummarySourceRouteRows(summaryName, routeFileName);
+showRouteSummary(rows, headers, routeRows);
 autoCollapseSidebarsForSummary();
 
 
